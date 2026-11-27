@@ -33,7 +33,6 @@ class ReaderActivity : Activity() {
     private lateinit var voiceInfo: TextView
     private lateinit var voices: Spinner
     private lateinit var preview: Button
-    private lateinit var save: Button
     private lateinit var rate: SeekBar
     private lateinit var pitch: SeekBar
     private lateinit var bookId: EditText
@@ -87,7 +86,7 @@ class ReaderActivity : Activity() {
             hint = "書籍別発音辞書のID（任意）"
             setText(preferences.bookId())
         }.also(content::addView)
-        save = button(content, "設定を保存") { saveSettings() }
+        button(content, "設定を保存") { saveSettings() }
         loadVoices()
     }
 

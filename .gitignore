@@ -6,3 +6,5 @@ __pycache__/
 /android/local.properties
 /.codex/
 /p2/out/
+
+/android/.kotlin/

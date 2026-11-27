@@ -40,12 +40,18 @@ internal class WindowPages(
         throw ReaderFailure("画面が動いています。本文を表示してから再開してください。")
     }
 
-    override suspend fun turn(forward: Boolean, previous: String): PageFrame {
+    override suspend fun prepareTurn(forward: Boolean, previous: String): suspend () -> PageFrame {
         val target = resolve() ?: throw ReaderFailure("DMMの表示を確認できません。")
         captureOnce(target).use {
             if (it.signature != previous) throw ReaderFailure("表示が変わったためページ送りを停止しました。")
         }
-        swipe(target, if (forward) rightward else !rightward)
+        return {
+            swipe(target, if (forward) rightward else !rightward)
+            awaitPage(target, previous)
+        }
+    }
+
+    private suspend fun awaitPage(target: ReaderWindow, previous: String): PageFrame {
         var last: String? = null
         var unchanged = 0
         repeat(5) {

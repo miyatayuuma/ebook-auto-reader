@@ -20,7 +20,7 @@ internal interface PageFrame : Closeable {
 }
 internal interface ReaderPages {
     suspend fun capture(): PageFrame
-    suspend fun turn(forward: Boolean, previous: String): PageFrame
+    suspend fun prepareTurn(forward: Boolean, previous: String): suspend () -> PageFrame
     suspend fun read(frame: PageFrame): PageText
 }
 internal interface ReaderAudio {
@@ -83,6 +83,7 @@ internal class ReaderSession(
                     }
                 }
                 val current = prepared ?: prepare(unit).also { prepared = it }
+                check(current.unit === unit)
                 val prefetchStarted = CompletableDeferred<Deferred<Unit>?>()
                 ahead = async {
                     val nextUnit = reserveNext() ?: run {
@@ -242,12 +243,20 @@ internal class ReaderSession(
         currentCoroutineContext().ensureActive()
         val from = requireNotNull(cursor)
         val expected = known[target]
+        val turn = try {
+            pages.prepareTurn(forward, from.signature)
+        } catch (failure: ReaderFailure) {
+            trusted = false
+            update(state.copy(displayed = null))
+            throw failure
+        }
+        currentCoroutineContext().ensureActive()
         var result: PageFrame? = null
         try {
             withContext(NonCancellable) {
                 trusted = false
                 update(state.copy(displayed = null))
-                val frame = withTimeoutOrNull(4_000) { pages.turn(forward, from.signature) }
+                val frame = withTimeoutOrNull(4_000) { turn() }
                     ?: throw ReaderFailure("ページ遷移の確認が時間内に完了しませんでした。")
                 result = frame
                 val matches = if (expected != null) frame.signature == expected.signature

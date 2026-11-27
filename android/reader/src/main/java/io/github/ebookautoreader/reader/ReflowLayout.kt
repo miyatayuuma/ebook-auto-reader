@@ -30,7 +30,10 @@ internal object ReflowLayout {
     private val visualTypes = setOf(6, 11, 15)
 
     fun read(regions: List<Region>, width: Int, height: Int, uniformLight: Boolean): PageText {
+        val rubyCandidates = regions.filter { it.type == 10 && it.detection >= 0.35f &&
+            it.certainty >= 0.65f && it.complete && it.text.isReading() }
         val ignored = regions.filter { it.type in setOf(8, 9) && it.detection >= 0.6f }
+
         val lines = mutableListOf<Region>()
         val candidates = regions.filter { it.type in setOf(1, 2, 4, 5, 16) }
             .sortedWith(compareByDescending<Region> { it.complete && it.text.isNotBlank() }
@@ -38,6 +41,9 @@ internal object ReflowLayout {
         for (candidate in candidates) {
             val box = candidate.box
             if (ignored.any { box.intersection(it.box) >= box.area * 0.85 }) continue
+            if (rubyCandidates.any {
+                    maxOf(box.area, it.box.area) * 0.85 <= box.intersection(it.box)
+                }) continue
             if (lines.any { box.intersection(it.box) >= maxOf(box.area, it.box.area) * 0.82 }) continue
             lines += candidate
         }
@@ -57,8 +63,7 @@ internal object ReflowLayout {
             else -> throw ReaderFailure("本文・図表・白紙を確定できません。表示ページを確認してください。")
         }
         val ruby = mutableMapOf<Region, MutableList<Reading>>()
-        for (small in regions.filter { it.type == 10 && it.detection >= 0.35f && it.certainty >= 0.65f &&
-            it.complete && it.text.isReading() }) {
+        for (small in rubyCandidates) {
             val parent = substantive.filter { canParent(it, small) }.singleOrNull() ?: continue
             val reading = associate(parent, small) ?: continue
             ruby.getOrPut(parent) { mutableListOf() }.add(reading)

@@ -237,7 +237,7 @@ internal suspend fun playSpeech(file: File, started: () -> Unit = {}, progress: 
             player.setAudioAttributes(speechAttributes)
             player.setDataSource(file.absolutePath)
             withTimeoutOrNull(8_000) {
-                suspendCancellableCoroutine { continuation ->
+                suspendCancellableCoroutine<Unit> { continuation ->
                     player.setOnPreparedListener {
                         if (continuation.isActive) continuation.resume(Unit)
                     }

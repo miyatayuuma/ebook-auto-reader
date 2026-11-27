@@ -79,6 +79,20 @@ class ReaderSessionTest {
     }
 
     @Test
+    fun pauseDuringTurnVerificationCancelsTheUnsentGesture() = runTest {
+        val pages = FakePages(listOf(body("朝です。"), body("次です。"))).apply { verificationDelay = 500 }
+        val audio = FakeAudio()
+        val session = ReaderSession(pages, audio, Pronunciations()) {}
+        val first = async { session.run() }
+        advanceTimeBy(300)
+        first.cancelAndJoin()
+        assertEquals(listOf("朝です。"), audio.starts)
+        assertEquals(emptyList<Boolean>(), pages.turns)
+        assertTrue(session.restore())
+        assertEquals(0, pages.display)
+    }
+
+    @Test
     fun duplicateStopsWithoutReadingSamePageTwiceAndUnchangedIsRestorable() = runTest {
         val duplicate = FakePages(listOf(body("一です。"), body("二です。"), body("三です。")),
             signatures = listOf("a", "b", "a"))
@@ -142,6 +156,7 @@ class ReaderSessionTest {
     private class FakePages(private val pages: List<PageText>,
                             private val signatures: List<String> = pages.indices.map(Int::toString)) : ReaderPages {
         var display = 0
+        var verificationDelay = 0L
         var frames = 0
         var closedFrames = 0
         val decoded = mutableListOf<Int>()
@@ -158,12 +173,15 @@ class ReaderSessionTest {
             return Frame(display)
         }
 
-        override suspend fun turn(forward: Boolean, previous: String): PageFrame {
+        override suspend fun prepareTurn(forward: Boolean, previous: String): suspend () -> PageFrame {
+            delay(verificationDelay)
             if (previous != signatures[display]) throw ReaderFailure("manual movement")
-            turns += forward
-            delay(55)
-            display = (display + if (forward) 1 else -1).coerceIn(pages.indices)
-            return capture()
+            return {
+                turns += forward
+                delay(55)
+                display = (display + if (forward) 1 else -1).coerceIn(pages.indices)
+                capture()
+            }
         }
 
         override suspend fun read(frame: PageFrame): PageText {
