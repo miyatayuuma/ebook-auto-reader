@@ -1,0 +1,5 @@
+Pillow==13.0.0
+ndlocr-lite==2.0.0
+pyopenjtalk-plus==0.4.1.post7
+SudachiPy==0.6.10
+SudachiDict-core==20250515
