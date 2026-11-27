@@ -384,8 +384,8 @@ class ReaderAccessibility : AccessibilityService() {
     }
 
     private fun runTurnTest(target: ReaderWindow, headless: Boolean) {
-        val settings = preferences.turn()
         val fixture = target.owner != DMM_BOOKS
+        val settings = turnSettings(target)
         probeWindow = target
         testingTurn = true
         headlessTest = headless
@@ -451,6 +451,10 @@ class ReaderAccessibility : AccessibilityService() {
                 ?: throw ReaderFailure("移動後の表示を確認できません。", "page_in_transition")
         }
 
+    private fun turnSettings(target: ReaderWindow) = preferences.turn().let { settings ->
+        if (target.owner == DMM_BOOKS) settings else settings.copy(rightward = true)
+    }
+
     private fun start() {
         if (mode != Mode.IDLE && mode != Mode.PAUSED) return
         val target = currentWindow() ?: return change(mode, "DMMの本文ウィンドウを確認できません。", expand = true)
@@ -458,7 +462,7 @@ class ReaderAccessibility : AccessibilityService() {
             clearSession()
             return change(Mode.IDLE, "対象の表示が変わりました。読み上げを開始し直してください。", expand = true)
         }
-        val settings = preferences.turn()
+        val settings = turnSettings(target)
         if (target.owner == DMM_BOOKS && !preferences.verifiedTurn(settings)) {
             return change(mode, "先に「ページ送り・復元テスト」で移動方向と復元を確認してください。", expand = true)
         }
@@ -540,8 +544,9 @@ class ReaderAccessibility : AccessibilityService() {
             state?.confirmed == null && (state?.bufferMs ?: 0) > 0 -> "先読み音声を準備中"
             else -> "次の文を準備中"
         }
-        val visible = state?.displayed?.plus(1)
-        val positions = if (visible != null) "\n表示 ${visible}ページ · バッファ ${state.bufferMs / 1000}秒" else ""
+        val positions = state?.let { position ->
+            position.displayed?.let { "\n表示 ${it + 1}ページ · バッファ ${position.bufferMs / 1000}秒" }
+        }.orEmpty()
         val next = text + positions + if (voiceFallback) "\n代替のオフライン音声" else ""
         if (next != status) {
             status = next
@@ -554,7 +559,7 @@ class ReaderAccessibility : AccessibilityService() {
         val target = sessionWindow ?: return false
         if (currentWindow() != target) return false
         restoring = true
-        refreshGuard()
+        change(Mode.BUSY, "読み上げ位置のページに復元中…", expand = true)
         return try {
             ReaderDiagnostics.measure("restore") { current.restore() }.also {
                 val failure = current.restoreFailure

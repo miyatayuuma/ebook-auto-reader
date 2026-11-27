@@ -152,8 +152,9 @@ class ReaderSessionTest {
     }
 
     @Test
-    fun uncertainSwipeStopsBeforeAnyOtherGestureAndCannotBeRestoredAutomatically() = runTest {
+    fun uncertainTurnStopsPlaybackBeforeAnyOtherGestureAndCannotBeRestoredAutomatically() = runTest {
         val pages = FakePages(listOf(body("晴れです。"), body("続きです。"))).apply {
+            verificationDelay = 100
             turnFailure = ReaderFailure("表示が動いています", "page_in_transition")
         }
         val audio = FakeAudio()
@@ -207,6 +208,19 @@ class ReaderSessionTest {
         assertEquals(listOf("先の文。", "次の文。", "最後です。"), audio.starts)
     }
 
+    @Test
+    fun drainsTenPagesInOrderAndKeepsTheTrailingTextOnAnUnchangedPage() = runTest {
+        val expected = (0..9).map { index -> if (index == 9) "最後の行" else "本文${index}です。" }
+        val source = FakePages(expected.map { body(it) })
+        val audio = FakeAudio()
+        val session = ReaderSession(source, audio, Pronunciations(), {})
+        assertEquals("page_unchanged", (runCatching { session.run() }.exceptionOrNull() as? ReaderFailure)?.reason)
+        assertEquals(expected, audio.starts)
+        assertEquals((0..9).toList(), source.decoded)
+        assertTrue(session.restore())
+        assertEquals(9, source.display)
+    }
+
     private fun body(vararg lines: String) = PageText(lines.map { SourceLine(it) }, PageKind.BODY)
 
     private class FakePages(private val pages: List<PageText>,
@@ -214,8 +228,10 @@ class ReaderSessionTest {
         var display = 0
         var verificationDelay = 0L
         var turnFailure: ReaderFailure? = null
-        private fun signature(page: Int): PageSignature =
-            PageSignature(ByteArray(120) { (signatures[page].first().code * 53).toByte() })
+        private fun signature(page: Int): PageSignature {
+            val code = signatures[page].first().code
+            return PageSignature(ByteArray(120) { if (code and (1 shl (it / 15)) != 0) 110 else 10 })
+        }
         var frames = 0
         var closedFrames = 0
         val decoded = mutableListOf<Int>()
