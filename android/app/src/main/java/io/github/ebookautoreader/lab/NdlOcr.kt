@@ -90,7 +90,8 @@ class NdlOcr(directory: File) : PageOcr {
         val dimensions = detector.inputNames.associateWith { shape(detector, it) }
         val imageName = dimensions.entries.single { it.value.size == 4 }.key
         val sizeName = dimensions.entries.single { it.value.size == 2 }.key
-        val dims = dimensions.getValue(imageName)
+        val dims = ndlImageShape(dimensions.getValue(imageName))
+        val sizeDims = ndlTargetSizeShape(dimensions.getValue(sizeName))
         val length = max(bitmap.width, bitmap.height)
         val square = Bitmap.createBitmap(length, length, Bitmap.Config.ARGB_8888)
         Canvas(square).apply {
@@ -100,7 +101,7 @@ class NdlOcr(directory: File) : PageOcr {
         val input = try { tensor(square, dims, true) } finally { square.recycle() }
         return input.use {
             OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(dims[2], dims[3])),
-                longArrayOf(1, 2)).use { imageSize ->
+                sizeDims).use { imageSize ->
                 detector.run(mapOf(imageName to input, sizeName to imageSize)).use { output ->
                     val categories = floats(output[0].value)
                     val boxes = floats(output[1].value)
@@ -139,6 +140,8 @@ class NdlOcr(directory: File) : PageOcr {
     }
 
     private fun recognize(bitmap: Bitmap, box: Rect): String {
+        val name = recognizer.inputNames.single()
+        val dims = ndlImageShape(shape(recognizer, name))
         val crop = Bitmap.createBitmap(bitmap, box.left, box.top, box.width(), box.height())
         val image = if (box.height() > box.width() * 0.8) {
             Bitmap.createBitmap(crop, 0, 0, crop.width, crop.height,
@@ -146,21 +149,21 @@ class NdlOcr(directory: File) : PageOcr {
         } else {
             crop
         }
-        val name = recognizer.inputNames.single()
-        val input = try { tensor(image, shape(recognizer, name), false) } finally {
+        val input = try { tensor(image, dims, false) } finally {
             if (image !== crop) image.recycle()
             if (crop !== bitmap) crop.recycle()
         }
         return input.use {
             recognizer.run(mapOf(name to input)).use { output ->
-                val batch = output[0].value as Array<*>
-                val steps = batch.single() as Array<*>
+                val batch = output[0].value as? Array<*>
+                val steps = batch?.singleOrNull() as? Array<*>
+                    ?: error("Expected PARSeq logits shaped [1, steps, classes]")
                 buildString {
                     for (step in steps) {
                         val logits = step as FloatArray
                         val id = logits.indices.maxByOrNull { logits[it] } ?: error("Empty logits")
                         if (id == 0) break
-                        append(charset[id - 1])
+                        append(charset.getOrNull(id - 1) ?: error("PARSeq class $id is outside the charset"))
                     }
                 }.replace(Regex(" *([、。]) *"), "$1")
             }

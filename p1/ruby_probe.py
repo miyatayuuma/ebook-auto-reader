@@ -21,6 +21,9 @@ if __name__ == "__main__":
     config = yaml.safe_load(class_map.read_text(encoding="utf-8"))
     detector = DEIM(str(models / "deim.onnx"), str(class_map), conf_threshold=0.25)
     recognizer = PARSEQ(str(models / "parseq.onnx"), charset)
+    for name, model in (("DEIM", detector), ("PARSeq", recognizer)):
+        for direction, tensors in (("input", model.session.get_inputs()), ("output", model.session.get_outputs())):
+            print(f"{name} {direction}: {[(tensor.name, tensor.type, tensor.shape) for tensor in tensors]}")
     rows = []
     for page, reference in read_json(fixtures / "reference.json").items():
         ruby_regions = [region for region in reference["regions"] if region["role"] == "ruby"]

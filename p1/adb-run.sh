@@ -20,7 +20,22 @@ adb shell run-as "$package" rm -f files/results/status.json
 if [[ "$run_ndl" == true ]]; then
   adb shell run-as "$package" mkdir -p files/ndl
   for file in deim.onnx parseq.onnx charset.json; do
-    adb exec-in run-as "$package" sh -c "'cat > files/ndl/$file.tmp && mv files/ndl/$file.tmp files/ndl/$file'" < "$models/$file"
+    local_path="$models/$file"
+    remote_path="files/ndl/$file"
+    expected_size=$(stat -c %s -- "$local_path")
+    expected_hash=$(sha256sum < "$local_path")
+    expected_hash=${expected_hash%% *}
+    if ! adb shell -T run-as "$package" sh -c "'cat > $remote_path.tmp'" < "$local_path" ||
+       ! adb shell -T run-as "$package" test -f "$remote_path.tmp" ||
+       ! actual_size=$(adb shell -T run-as "$package" stat -c %s "$remote_path.tmp") ||
+       ! actual_hash=$(adb shell -T run-as "$package" sha256sum "$remote_path.tmp") ||
+       [[ "$actual_size" != "$expected_size" || "${actual_hash%% *}" != "$expected_hash" ]] ||
+       ! adb shell -T run-as "$package" mv -f "$remote_path.tmp" "$remote_path"; then
+      adb shell -T run-as "$package" rm -f "$remote_path.tmp" || true
+      printf 'NDL model transfer or verification failed: %s\n' "$file" >&2
+      exit 1
+    fi
+    printf 'Verified %s (%s bytes, SHA-256 %s)\n' "$file" "$expected_size" "$expected_hash"
   done
 fi
 adb shell am start -n "$package/.LabActivity" --ez autorun true --ez run_ndl "$run_ndl"
