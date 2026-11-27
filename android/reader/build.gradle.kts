@@ -33,7 +33,7 @@ val stageFixtures by tasks.registering(Sync::class) {
     into(layout.buildDirectory.dir("fixture-assets"))
 }
 
-tasks.matching { it.name == "mergeDebugAssets" }.configureEach { dependsOn(stageFixtures) }
+tasks.named("preBuild") { dependsOn(stageFixtures) }
 
 dependencies {
     implementation(project(":ndl"))

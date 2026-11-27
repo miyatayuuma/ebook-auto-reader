@@ -1,12 +1,14 @@
 package io.github.ebookautoreader.reader
 
 import android.accessibilityservice.AccessibilityService
+import android.app.KeyguardManager
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.os.SystemClock
+import android.os.PowerManager
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -33,6 +35,8 @@ class ReaderAccessibility : AccessibilityService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val manager by lazy { getSystemService(WindowManager::class.java) }
+    private val power by lazy { getSystemService(PowerManager::class.java) }
+    private val lockScreen by lazy { getSystemService(KeyguardManager::class.java) }
     private val preferences by lazy { ReaderPreferences(this) }
     private var mode = Mode.IDLE
     private var job: Job? = null
@@ -62,6 +66,7 @@ class ReaderAccessibility : AccessibilityService() {
     }
 
     private fun currentWindow(): ReaderWindow? {
+        if (!power.isInteractive || lockScreen.isKeyguardLocked) return null
         val focused = windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isFocused }
             ?: return null
         val root = focused.root ?: return null
@@ -153,6 +158,7 @@ class ReaderAccessibility : AccessibilityService() {
             return
         }
         val guard = View(this).apply {
+            keepScreenOn = true
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             setOnTouchListener { _, event ->
                 if (event.actionMasked == MotionEvent.ACTION_DOWN && mode == Mode.READING) stop(pause = true)
