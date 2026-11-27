@@ -34,6 +34,7 @@ jobs:
           python p1/ocr.py ndl
           python p1/ocr.py score p1/out/ndl-pc.json
           python p1/prepare_models.py
+          python p1/ruby_probe.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:

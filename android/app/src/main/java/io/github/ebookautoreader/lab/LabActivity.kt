@@ -70,11 +70,15 @@ class LabActivity : Activity() {
                 part("mlkit") {
                     benchmarkOcr("ML Kit Japanese 16.0.1 Android", pages, stage.resolve("mlkit.json"), ::MlKitOcr)
                 }
-                part("ndl") {
-                    val directory = filesDir.resolve("ndl")
-                    check(directory.isDirectory) { "NDL models missing. Follow prepare-models and adb-run." }
-                    benchmarkOcr("NDLOCR-Lite 2.0.0 Android prototype", pages,
-                        stage.resolve("ndl-android.json")) { NdlOcr(directory) }
+                if (intent.getBooleanExtra("run_ndl", true)) {
+                    part("ndl") {
+                        val directory = filesDir.resolve("ndl")
+                        check(directory.isDirectory) { "NDL models missing. Follow prepare-models and adb-run." }
+                        benchmarkOcr("NDLOCR-Lite 2.0.0 Android prototype", pages,
+                            stage.resolve("ndl-android.json")) { NdlOcr(directory) }
+                    }
+                } else {
+                    summary.put("ndl", "skipped")
                 }
                 part("google") {
                     val cases = JSONArray(assets.open("speech.json").bufferedReader().use { it.readText() })

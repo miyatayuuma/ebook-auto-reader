@@ -166,6 +166,11 @@ def listening(root, folders):
                                     f"<audio controls preload='none' src='{escape(relpath(sound, root))}'>"
                                     "</audio></p>")
                         writer.writerow([case["id"], engine, take, "", "", "", "", ""])
+    html.append(
+        '<footer>HTS Voice “Mei” © 2009–2013 Nagoya Institute of Technology '
+        '(MMDAgent Project Team), <a href="https://creativecommons.org/licenses/by/3.0/">'
+        'CC BY 3.0</a>. Open JTalkで自作テキストを合成した音声を収録。</footer>'
+    )
     (root / "index.html").write_text("\n".join(html), encoding="utf-8")
 
 

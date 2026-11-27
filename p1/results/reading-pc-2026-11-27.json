@@ -1,0 +1,556 @@
+{
+  "versions": {
+    "pyopenjtalk-plus": "0.4.1.post7",
+    "SudachiPy": "0.6.10",
+    "SudachiDict-core": "20250515"
+  },
+  "totals": {
+    "sudachi": {
+      "correct": 10,
+      "wrong": 7,
+      "unscored": 3
+    },
+    "openJtalkOriginal": {
+      "correct": 10,
+      "wrong": 7,
+      "unscored": 3
+    },
+    "openJtalkCorrected": {
+      "correct": 16,
+      "wrong": 1,
+      "unscored": 3
+    },
+    "sudachiWithOverrides": {
+      "correct": 15,
+      "wrong": 2,
+      "unscored": 3
+    }
+  },
+  "rows": [
+    {
+      "id": "r01",
+      "category": "多音語",
+      "source": "context-rule",
+      "expected": [
+        "いっこう"
+      ],
+      "readings": {
+        "sudachi": "いっこう",
+        "openJtalkOriginal": "いっこう",
+        "openJtalkCorrected": "いっこう",
+        "sudachiWithOverrides": "いっこう"
+      },
+      "verdicts": {
+        "sudachi": "correct",
+        "openJtalkOriginal": "correct",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "correct"
+      },
+      "original": {
+        "ms": 129.3,
+        "audioSeconds": 4.37,
+        "peak": 32768
+      },
+      "corrected": {
+        "ms": 126.08,
+        "audioSeconds": 4.37,
+        "peak": 32768
+      }
+    },
+    {
+      "id": "r02",
+      "category": "多音語",
+      "source": "context-rule",
+      "expected": [
+        "いちぎょう"
+      ],
+      "readings": {
+        "sudachi": "いっこう",
+        "openJtalkOriginal": "いっこう",
+        "openJtalkCorrected": "いちぎょう",
+        "sudachiWithOverrides": "いちぎょう"
+      },
+      "verdicts": {
+        "sudachi": "wrong",
+        "openJtalkOriginal": "wrong",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "correct"
+      },
+      "original": {
+        "ms": 119.67,
+        "audioSeconds": 4.23,
+        "peak": 30757
+      },
+      "corrected": {
+        "ms": 120.87,
+        "audioSeconds": 4.265,
+        "peak": 21951
+      }
+    },
+    {
+      "id": "r03",
+      "category": "多音語",
+      "source": "context-rule",
+      "expected": [
+        "いちば"
+      ],
+      "readings": {
+        "sudachi": "しじょう",
+        "openJtalkOriginal": "しじょう",
+        "openJtalkCorrected": "いちば",
+        "sudachiWithOverrides": "いちば"
+      },
+      "verdicts": {
+        "sudachi": "wrong",
+        "openJtalkOriginal": "wrong",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "correct"
+      },
+      "original": {
+        "ms": 123.75,
+        "audioSeconds": 4.33,
+        "peak": 30011
+      },
+      "corrected": {
+        "ms": 121.08,
+        "audioSeconds": 4.26,
+        "peak": 31608
+      }
+    },
+    {
+      "id": "r04",
+      "category": "多音語",
+      "source": "context-rule",
+      "expected": [
+        "しじょう"
+      ],
+      "readings": {
+        "sudachi": "しじょう",
+        "openJtalkOriginal": "しじょう",
+        "openJtalkCorrected": "しじょう",
+        "sudachiWithOverrides": "しじょう"
+      },
+      "verdicts": {
+        "sudachi": "correct",
+        "openJtalkOriginal": "correct",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "correct"
+      },
+      "original": {
+        "ms": 120.89,
+        "audioSeconds": 4.17,
+        "peak": 32768
+      },
+      "corrected": {
+        "ms": 118.99,
+        "audioSeconds": 4.175,
+        "peak": 32768
+      }
+    },
+    {
+      "id": "r05",
+      "category": "多音語",
+      "source": null,
+      "expected": [
+        "じょうず"
+      ],
+      "readings": {
+        "sudachi": "じょうず",
+        "openJtalkOriginal": "じょうず",
+        "openJtalkCorrected": "じょうず",
+        "sudachiWithOverrides": "じょうず"
+      },
+      "verdicts": {
+        "sudachi": "correct",
+        "openJtalkOriginal": "correct",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "correct"
+      }
+    },
+    {
+      "id": "r06",
+      "category": "多音語",
+      "source": "context-rule",
+      "expected": [
+        "かみて"
+      ],
+      "readings": {
+        "sudachi": "かみて",
+        "openJtalkOriginal": "じょうず",
+        "openJtalkCorrected": "かみて",
+        "sudachiWithOverrides": "かみて"
+      },
+      "verdicts": {
+        "sudachi": "correct",
+        "openJtalkOriginal": "wrong",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "correct"
+      },
+      "original": {
+        "ms": 131.94,
+        "audioSeconds": 4.655,
+        "peak": 28297
+      },
+      "corrected": {
+        "ms": 132.38,
+        "audioSeconds": 4.74,
+        "peak": 29671
+      }
+    },
+    {
+      "id": "r07",
+      "category": "多音語",
+      "source": null,
+      "expected": [
+        "かみて"
+      ],
+      "readings": {
+        "sudachi": "かみて",
+        "openJtalkOriginal": "じょうず",
+        "openJtalkCorrected": "じょうず",
+        "sudachiWithOverrides": "かみて"
+      },
+      "verdicts": {
+        "sudachi": "correct",
+        "openJtalkOriginal": "wrong",
+        "openJtalkCorrected": "wrong",
+        "sudachiWithOverrides": "correct"
+      }
+    },
+    {
+      "id": "r08",
+      "category": "多音語",
+      "source": null,
+      "expected": [
+        "せいぶつ"
+      ],
+      "readings": {
+        "sudachi": "せいぶつ",
+        "openJtalkOriginal": "せいぶつ",
+        "openJtalkCorrected": "せいぶつ",
+        "sudachiWithOverrides": "せいぶつ"
+      },
+      "verdicts": {
+        "sudachi": "correct",
+        "openJtalkOriginal": "correct",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "correct"
+      }
+    },
+    {
+      "id": "r09",
+      "category": "多音語",
+      "source": "context-rule",
+      "expected": [
+        "なまもの"
+      ],
+      "readings": {
+        "sudachi": "せいぶつ",
+        "openJtalkOriginal": "せいぶつ",
+        "openJtalkCorrected": "なまもの",
+        "sudachiWithOverrides": "なまもの"
+      },
+      "verdicts": {
+        "sudachi": "wrong",
+        "openJtalkOriginal": "wrong",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "correct"
+      },
+      "original": {
+        "ms": 122.31,
+        "audioSeconds": 4.325,
+        "peak": 32768
+      },
+      "corrected": {
+        "ms": 121.29,
+        "audioSeconds": 4.245,
+        "peak": 32768
+      }
+    },
+    {
+      "id": "r10",
+      "category": "地名",
+      "source": "dictionary",
+      "expected": [
+        "ごきそ"
+      ],
+      "readings": {
+        "sudachi": "ごきそ",
+        "openJtalkOriginal": "ごきそ",
+        "openJtalkCorrected": "ごきそ",
+        "sudachiWithOverrides": "ごきそ"
+      },
+      "verdicts": {
+        "sudachi": "correct",
+        "openJtalkOriginal": "correct",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "correct"
+      },
+      "original": {
+        "ms": 121.38,
+        "audioSeconds": 4.275,
+        "peak": 24656
+      },
+      "corrected": {
+        "ms": 119.23,
+        "audioSeconds": 4.275,
+        "peak": 24437
+      }
+    },
+    {
+      "id": "r11",
+      "category": "地名",
+      "source": "dictionary",
+      "expected": [
+        "もず"
+      ],
+      "readings": {
+        "sudachi": "もず",
+        "openJtalkOriginal": "もず",
+        "openJtalkCorrected": "もず",
+        "sudachiWithOverrides": "もず"
+      },
+      "verdicts": {
+        "sudachi": "correct",
+        "openJtalkOriginal": "correct",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "correct"
+      }
+    },
+    {
+      "id": "r12",
+      "category": "人名・ルビ",
+      "source": "ruby",
+      "expected": [
+        "あおね"
+      ],
+      "readings": {
+        "sudachi": "そらね",
+        "openJtalkOriginal": "そらね",
+        "openJtalkCorrected": "あおね",
+        "sudachiWithOverrides": "あおね"
+      },
+      "verdicts": {
+        "sudachi": "wrong",
+        "openJtalkOriginal": "wrong",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "correct"
+      },
+      "original": {
+        "ms": 115.27,
+        "audioSeconds": 4.075,
+        "peak": 23792
+      },
+      "corrected": {
+        "ms": 115.36,
+        "audioSeconds": 3.985,
+        "peak": 30111
+      }
+    },
+    {
+      "id": "r13",
+      "category": "専門語",
+      "source": null,
+      "expected": [
+        "ふくくっせつ"
+      ],
+      "readings": {
+        "sudachi": "ふくくっせつ",
+        "openJtalkOriginal": "ふくくっせつ",
+        "openJtalkCorrected": "ふくくっせつ",
+        "sudachiWithOverrides": "ふくくっせつ"
+      },
+      "verdicts": {
+        "sudachi": "correct",
+        "openJtalkOriginal": "correct",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "correct"
+      },
+      "original": {
+        "ms": 131.38,
+        "audioSeconds": 4.695,
+        "peak": 30783
+      },
+      "corrected": {
+        "ms": 131.66,
+        "audioSeconds": 4.695,
+        "peak": 30783
+      }
+    },
+    {
+      "id": "r14",
+      "category": "数字",
+      "source": null,
+      "expected": [
+        "さんてんご"
+      ],
+      "readings": {
+        "sudachi": null,
+        "openJtalkOriginal": null,
+        "openJtalkCorrected": null,
+        "sudachiWithOverrides": null
+      },
+      "verdicts": {
+        "sudachi": "unscored",
+        "openJtalkOriginal": "unscored",
+        "openJtalkCorrected": "unscored",
+        "sudachiWithOverrides": "unscored"
+      },
+      "original": {
+        "ms": 112.73,
+        "audioSeconds": 3.95,
+        "peak": 21049
+      },
+      "corrected": {
+        "ms": 111.57,
+        "audioSeconds": 3.95,
+        "peak": 21049
+      }
+    },
+    {
+      "id": "r15",
+      "category": "数字・単位",
+      "source": null,
+      "expected": [
+        "さんてんごみり",
+        "さんてんごみりめーとる"
+      ],
+      "readings": {
+        "sudachi": null,
+        "openJtalkOriginal": null,
+        "openJtalkCorrected": null,
+        "sudachiWithOverrides": null
+      },
+      "verdicts": {
+        "sudachi": "unscored",
+        "openJtalkOriginal": "unscored",
+        "openJtalkCorrected": "unscored",
+        "sudachiWithOverrides": "unscored"
+      },
+      "original": {
+        "ms": 142.37,
+        "audioSeconds": 5.055,
+        "peak": 32768
+      },
+      "corrected": {
+        "ms": 141.31,
+        "audioSeconds": 5.055,
+        "peak": 32768
+      }
+    },
+    {
+      "id": "r16",
+      "category": "記号・単位",
+      "source": null,
+      "expected": [
+        "まいなすごど",
+        "まいなすごどしー",
+        "まいなすごせっしど"
+      ],
+      "readings": {
+        "sudachi": "きごうごきごうど",
+        "openJtalkOriginal": null,
+        "openJtalkCorrected": null,
+        "sudachiWithOverrides": "きごうごきごうど"
+      },
+      "verdicts": {
+        "sudachi": "wrong",
+        "openJtalkOriginal": "unscored",
+        "openJtalkCorrected": "unscored",
+        "sudachiWithOverrides": "wrong"
+      }
+    },
+    {
+      "id": "r17",
+      "category": "日付",
+      "source": null,
+      "expected": [
+        "おととい",
+        "いっさくじつ"
+      ],
+      "readings": {
+        "sudachi": "いっさくひ",
+        "openJtalkOriginal": "おととい",
+        "openJtalkCorrected": "おととい",
+        "sudachiWithOverrides": "いっさくひ"
+      },
+      "verdicts": {
+        "sudachi": "wrong",
+        "openJtalkOriginal": "correct",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "wrong"
+      }
+    },
+    {
+      "id": "r18",
+      "category": "長文",
+      "source": null,
+      "expected": [
+        "せきえいへん"
+      ],
+      "readings": {
+        "sudachi": "せきえいへん",
+        "openJtalkOriginal": "せきえいへん",
+        "openJtalkCorrected": "せきえいへん",
+        "sudachiWithOverrides": "せきえいへん"
+      },
+      "verdicts": {
+        "sudachi": "correct",
+        "openJtalkOriginal": "correct",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "correct"
+      },
+      "original": {
+        "ms": 775.47,
+        "audioSeconds": 28.825,
+        "peak": 32767
+      },
+      "corrected": {
+        "ms": 792.19,
+        "audioSeconds": 28.825,
+        "peak": 32767
+      }
+    },
+    {
+      "id": "r19",
+      "category": "組版ルビ",
+      "source": "ruby",
+      "expected": [
+        "あかつきのかね"
+      ],
+      "readings": {
+        "sudachi": "ぎょうしょう",
+        "openJtalkOriginal": "ぎょうしょう",
+        "openJtalkCorrected": "あかつきのかね",
+        "sudachiWithOverrides": "あかつきのかね"
+      },
+      "verdicts": {
+        "sudachi": "wrong",
+        "openJtalkOriginal": "wrong",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "correct"
+      }
+    },
+    {
+      "id": "r20",
+      "category": "助数詞",
+      "source": null,
+      "expected": [
+        "さんわ",
+        "さんば"
+      ],
+      "readings": {
+        "sudachi": null,
+        "openJtalkOriginal": "さんわ",
+        "openJtalkCorrected": "さんわ",
+        "sudachiWithOverrides": null
+      },
+      "verdicts": {
+        "sudachi": "unscored",
+        "openJtalkOriginal": "correct",
+        "openJtalkCorrected": "correct",
+        "sudachiWithOverrides": "unscored"
+      }
+    }
+  ]
+}
