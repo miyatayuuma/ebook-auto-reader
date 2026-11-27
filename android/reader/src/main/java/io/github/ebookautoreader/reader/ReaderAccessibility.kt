@@ -12,21 +12,28 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.view.Choreographer
 import android.view.Display
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
+import kotlin.math.roundToInt
 
 internal const val DMM_BOOKS = "com.dmm.app.dmmbooks_google_play"
 
@@ -48,8 +55,10 @@ class ReaderAccessibility : AccessibilityService() {
     private var panelWindow: ReaderWindow? = null
     private var ocr: OnDeviceOcr? = null
     private var speech: DeviceSpeech? = null
+    private var audio: DeviceAudio? = null
     private var controls: FloatingControls? = null
     private var gestureAllowed = false
+    private var testingTurn = false
     private var restoring = false
     private var collapseOnPlayback = false
     private var voiceFallback = false
@@ -129,7 +138,7 @@ class ReaderAccessibility : AccessibilityService() {
         targetMissing = false
         handler.removeCallbacks(confirmWindowLoss)
         if (lost) {
-            if (controls != null) ReaderDiagnostics.event("window lost mode=$mode jobActive=${job?.isActive == true}")
+            if (controls != null) ReaderDiagnostics.event("window lost reason=window_changed mode=$mode jobActive=${job?.isActive == true}")
             detachPanel()
             if (mode == Mode.READING || mode == Mode.PROBE || mode == Mode.PAUSED) {
                 stop(pause = false, sync = false)
@@ -143,7 +152,8 @@ class ReaderAccessibility : AccessibilityService() {
                     Mode.READING -> stop(pause = true)
                     else -> Unit
                 }
-            }, endAction = { stop(pause = false) }, probeAction = ::probe, manualTouch = {
+            }, endAction = { stop(pause = false) }, probeAction = ::probe, turnTestAction = ::testTurn,
+                adjustRate = ::adjustRate, manualTouch = {
                 if (mode == Mode.READING && !gestureAllowed) stop(pause = true)
             })
             try {
@@ -167,7 +177,8 @@ class ReaderAccessibility : AccessibilityService() {
 
     private fun refreshGuard() {
         val reading = mode == Mode.READING && ocrProgress?.timedOut != true
-        controls?.guardTouches((reading || restoring) && !gestureAllowed, reading || restoring)
+        val locked = reading || restoring || testingTurn
+        controls?.guardTouches(locked && !gestureAllowed, locked)
     }
 
     private fun render() {
@@ -177,7 +188,22 @@ class ReaderAccessibility : AccessibilityService() {
             else -> "読み上げ開始"
         }, canAct = mode == Mode.IDLE || mode == Mode.PAUSED || mode == Mode.READING,
             canEnd = mode == Mode.READING || mode == Mode.PAUSED || mode == Mode.PROBE,
-            canProbe = mode == Mode.IDLE || mode == Mode.PAUSED)
+            canProbe = mode == Mode.IDLE || mode == Mode.PAUSED, canTestTurn = mode == Mode.IDLE,
+            rate = preferences.speech().rate)
+    }
+
+    private fun adjustRate(step: Int) {
+        val current = (preferences.speech().rate * 100).roundToInt()
+        val next = ((current + step * 10) / 100f).coerceIn(MIN_SPEECH_RATE, MAX_SPEECH_RATE)
+        try {
+            audio?.setRate(next)
+            preferences.saveRate(next)
+            ReaderDiagnostics.event("playback rate_percent=${(next * 100).roundToInt()}")
+        } catch (error: RuntimeException) {
+            ReaderDiagnostics.event("playback rate_failed type=${error.javaClass.simpleName}")
+            status = "現在の再生速度を変更できませんでした。"
+        }
+        render()
     }
 
     private fun change(next: Mode, message: String, expand: Boolean = false) {
@@ -216,10 +242,9 @@ class ReaderAccessibility : AccessibilityService() {
     }
 
     private fun pagePort(target: ReaderWindow, engine: OnDeviceOcr? = null) = WindowPages(
-        this, { currentWindow()?.takeIf { it == target } }, { allowed ->
-            gestureAllowed = allowed
-            refreshGuard()
-        }, ::awaitScreenshotSlot, if (target.owner == DMM_BOOKS) preferences.rightward() else true,
+        this, { currentWindow()?.takeIf { it == target } }, ::withoutOverlays,
+        { hasReaderMenu(target) }, ::awaitScreenshotSlot,
+        if (target.owner == DMM_BOOKS) preferences.rightward() else true,
     ) { frame ->
         requireNotNull(engine).read(frame.bitmap, frame.uniformLight) {
             ocrProgress = it
@@ -229,6 +254,66 @@ class ReaderAccessibility : AccessibilityService() {
                 refreshGuard()
             }
         }
+    }
+
+    private suspend fun withoutOverlays(send: suspend () -> Unit) {
+        val panel = controls ?: throw ReaderFailure("操作パネルのウィンドウがありません。", "window_changed")
+        gestureAllowed = true
+        try {
+            panel.suspendWindows()
+            repeat(2) { awaitDisplayFrame() }
+            if (!panel.windowsDetached()) {
+                throw ReaderFailure("操作パネルのタッチ解除を確認できません。", "overlay_detach_unconfirmed")
+            }
+            ReaderDiagnostics.event("gesture overlays=detached display_frames=2")
+            send()
+        } finally {
+            gestureAllowed = false
+            if (controls === panel) {
+                refreshGuard()
+                panel.resumeWindows()
+            }
+        }
+    }
+
+    private suspend fun awaitDisplayFrame() = suspendCancellableCoroutine<Unit> { continuation ->
+        val choreographer = Choreographer.getInstance()
+        val callback = Choreographer.FrameCallback { if (continuation.isActive) continuation.resume(Unit) }
+        choreographer.postFrameCallback(callback)
+        continuation.invokeOnCancellation { handler.post { choreographer.removeFrameCallback(callback) } }
+    }
+
+    private fun hasReaderMenu(target: ReaderWindow): Boolean {
+        val root = windows.firstOrNull { it.id == target.id }?.root ?: return false
+        val pending = ArrayDeque<AccessibilityNodeInfo>().apply { add(root) }
+        val buttons = mutableListOf<Rect>()
+        val lower = target.bounds.bottom - target.bounds.height() / 4
+        repeat(160) {
+            val node = pending.removeFirstOrNull() ?: return false
+            if (!node.isVisibleToUser) return@repeat
+            val bounds = Rect().also(node::getBoundsInScreen)
+            if (bounds.top >= lower && bounds.bottom <= target.bounds.bottom && !bounds.isEmpty) {
+                val kind = node.className?.toString()
+                val adjustable = AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS in node.actionList
+                if (kind == "android.widget.SeekBar" || (adjustable && node.rangeInfo != null &&
+                    bounds.width() >= target.bounds.width() / 3 && bounds.height() < target.bounds.height() / 8)) {
+                    ReaderDiagnostics.event("page menu source=lower_slider")
+                    return true
+                }
+                if (node.isClickable && (kind == "android.widget.ImageButton" || kind == "android.widget.Button") &&
+                    bounds.width() <= target.bounds.width() / 3 && bounds.height() <= target.bounds.height() / 8) {
+                    buttons.add(bounds)
+                    val row = buttons.filter { kotlin.math.abs(it.centerY() - bounds.centerY()) < bounds.height() / 2 }
+                    if (row.size >= 3 && row.maxOf { it.centerX() } - row.minOf { it.centerX() } >
+                        target.bounds.width() / 3) {
+                        ReaderDiagnostics.event("page menu source=lower_buttons")
+                        return true
+                    }
+                }
+            }
+            for (index in 0 until node.childCount) node.getChild(index)?.let(pending::addLast)
+        }
+        return false
     }
 
     private suspend fun awaitScreenshotSlot() {
@@ -258,6 +343,50 @@ class ReaderAccessibility : AccessibilityService() {
         }
     }
 
+    private fun testTurn() {
+        if (mode != Mode.IDLE) return
+        val target = currentWindow() ?: return
+        probeWindow = target
+        testingTurn = true
+        change(Mode.PROBE, "ページ送りと復元を確認中…")
+        operate("turn_test") {
+            var mayHaveMoved = false
+            val outcome = try {
+                val pages = pagePort(target)
+                val origin = pages.capture().use { it.signature }
+                val next = pages.prepareTurn(forward = true, previous = origin)
+                withContext(NonCancellable) {
+                    mayHaveMoved = true
+                    val destination = withTimeoutOrNull(8_000) { next().use { it.signature } }
+                        ?: throw ReaderFailure("送り先の表示を確認できません。", "page_in_transition")
+                    if (destination.matches(origin)) {
+                        mayHaveMoved = false
+                        throw ReaderFailure("ページが変わりませんでした。書籍の途中で操作方向を確認してください。", "page_unchanged")
+                    }
+                    val back = pages.prepareTurn(forward = false, previous = destination)
+                    val returned = withTimeoutOrNull(8_000) { back().use { it.signature } }
+                        ?: throw ReaderFailure("復元先の表示を確認できません。", "page_in_transition")
+                    if (!returned.matches(origin)) {
+                        throw ReaderFailure("逆方向の操作で元のページに戻れませんでした。", "page_restore_mismatch")
+                    }
+                    mayHaveMoved = false
+                }
+                ReaderDiagnostics.event("page turn test result=round_trip_ok")
+                "1回送って元のページに戻りました。"
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                logFailure("turn_test", error)
+                userMessage(error) + if (mayHaveMoved) " 表示ページを手動で確認してください。" else ""
+            } finally {
+                probeWindow = null
+                testingTurn = false
+                refreshGuard()
+            }
+            change(Mode.IDLE, outcome, expand = true)
+        }
+    }
+
     private fun start() {
         if (mode != Mode.IDLE && mode != Mode.PAUSED) return
         val target = currentWindow() ?: return change(mode, "DMMの本文ウィンドウを確認できません。", expand = true)
@@ -271,6 +400,7 @@ class ReaderAccessibility : AccessibilityService() {
         operate("read") {
             try {
                 val current = session ?: createSession(target).also { session = it }
+                audio?.startOutput()
                 current.run()
             } catch (error: CancellationException) {
                 throw error
@@ -299,6 +429,7 @@ class ReaderAccessibility : AccessibilityService() {
             voiceFallback = true
             updateReadingStatus()
         }
+        this.audio = audio
         return ReaderSession(pagePort(target, createdOcr), audio, pronunciations, ::onState)
     }
 
@@ -333,6 +464,7 @@ class ReaderAccessibility : AccessibilityService() {
             progress != null -> progress.label + (detail?.let { "\n$it" } ?: "")
             detail != null -> detail
             state?.stage == ReaderStage.CAPTURE -> "画面取得中"
+            state?.displayed == null && state?.ocr != null -> "ページの遷移を確認中"
             state?.stage == ReaderStage.RESTORE -> "表示ページを復元中"
             else -> "次の文を準備中"
         }
@@ -351,7 +483,8 @@ class ReaderAccessibility : AccessibilityService() {
         refreshGuard()
         return try {
             ReaderDiagnostics.measure("restore") { current.restore() }.also {
-                ReaderDiagnostics.event("restore synchronized=$it")
+                val failure = current.restoreFailure
+                ReaderDiagnostics.event("restore synchronized=$it reason=${failure?.reason ?: "none"}")
             }
         } finally {
             restoring = false
@@ -374,11 +507,13 @@ class ReaderAccessibility : AccessibilityService() {
             if (pause && synchronized && session != null) {
                 change(Mode.PAUSED, "一時停止 · 文頭から再開", expand = true)
             } else {
+                val restoreFailure = session?.restoreFailure?.message
                 clearSession()
                 change(Mode.IDLE, when {
                     !sync -> "対象ウィンドウが変わったため停止しました。"
                     wasProbe && synchronized -> "画面取得を終了しました。"
                     synchronized -> "終了 · 読み上げ位置に表示を同期"
+                    restoreFailure != null -> "停止 · $restoreFailure 表示ページを手動で確認してください。"
                     else -> "停止 · 表示ページを手動で確認してください。"
                 }, expand = true)
             }
@@ -392,6 +527,7 @@ class ReaderAccessibility : AccessibilityService() {
         val closedSpeech = speech
         ocr = null
         speech = null
+        audio = null
         for (resource in listOfNotNull(closedOcr, closedSpeech)) {
             try {
                 resource.close()

@@ -27,6 +27,8 @@ internal class FloatingControls(
     primaryAction: () -> Unit,
     endAction: () -> Unit,
     probeAction: () -> Unit,
+    turnTestAction: () -> Unit,
+    adjustRate: (Int) -> Unit,
     manualTouch: () -> Unit,
 ) {
     private val theme = ContextThemeWrapper(context, android.R.style.Theme_Material_Light)
@@ -64,6 +66,20 @@ internal class FloatingControls(
     private val primary = button(primaryAction)
     private val end = button(endAction)
     private val probe = button(probeAction)
+    private val turnTest = button(turnTestAction)
+    private val slower = button { adjustRate(-1) }.apply {
+        text = "−"
+        contentDescription = "読み上げ速度を下げる"
+    }
+    private val faster = button { adjustRate(1) }.apply {
+        text = "＋"
+        contentDescription = "読み上げ速度を上げる"
+    }
+    private val speed = TextView(theme).apply {
+        gravity = Gravity.CENTER
+        setTextColor(ink)
+        textSize = 16f
+    }
     private val params = overlay(dp(48), dp(48)).apply { gravity = Gravity.TOP or Gravity.START }
     private val guardParams = overlay(-1, -1).apply { flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE }
     // The guard consumes ACTION_DOWN during reading, and does not represent a clickable control.
@@ -76,6 +92,7 @@ internal class FloatingControls(
         }
     }
     private var attached = false
+    private var suspended = false
     private val placed = Rect()
     private var insets: Insets? = null
     private var pressed = false
@@ -100,7 +117,13 @@ internal class FloatingControls(
         actions.addView(primary, LinearLayout.LayoutParams(0, dp(48), 1f))
         actions.addView(end, LinearLayout.LayoutParams(0, dp(48), 1f))
         body.addView(actions)
+        val rateControls = LinearLayout(theme)
+        rateControls.addView(slower, LinearLayout.LayoutParams(dp(52), dp(48)))
+        rateControls.addView(speed, LinearLayout.LayoutParams(0, dp(48), 1f))
+        rateControls.addView(faster, LinearLayout.LayoutParams(dp(52), dp(48)))
+        body.addView(rateControls)
         body.addView(probe, LinearLayout.LayoutParams(-1, dp(48)))
+        body.addView(turnTest, LinearLayout.LayoutParams(-1, dp(48)))
         panel.setOnApplyWindowInsetsListener { view, received ->
             val safe = received.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
             if (insets != safe) {
@@ -154,23 +177,47 @@ internal class FloatingControls(
 
     fun attach() {
         reflow()
+        addWindows()
+        attached = true
+    }
+
+    private fun addWindows() {
         manager.addView(guard, guardParams)
         try {
             manager.addView(panel, params)
             placed.set(params.x, params.y, params.x + params.width, params.y + params.height)
-            attached = true
         } catch (error: Exception) {
             manager.removeViewImmediate(guard)
             throw error
         }
     }
 
-    fun detach() {
+    private fun removeWindows() {
         handle.removeCallbacks(longPress)
-        if (!attached) return
-        attached = false
+        pressed = false
+        dragged = false
         manager.removeViewImmediate(panel)
         manager.removeViewImmediate(guard)
+    }
+
+    fun suspendWindows() {
+        if (!attached || suspended) return
+        removeWindows()
+        suspended = true
+    }
+
+    fun windowsDetached() = !panel.isAttachedToWindow && !guard.isAttachedToWindow
+
+    fun resumeWindows() {
+        if (!attached || !suspended) return
+        addWindows()
+        suspended = false
+    }
+
+    fun detach() {
+        if (!attached) return
+        attached = false
+        if (!suspended) removeWindows()
     }
 
     fun expand(show: Boolean) {
@@ -181,9 +228,14 @@ internal class FloatingControls(
         reflow()
     }
 
-    fun render(message: String, playing: Boolean, action: String, canAct: Boolean, canEnd: Boolean, canProbe: Boolean) {
+    fun render(
+        message: String, playing: Boolean, action: String, canAct: Boolean, canEnd: Boolean,
+        canProbe: Boolean, canTestTurn: Boolean, rate: Float,
+    ) {
+        val formatted = String.format(java.util.Locale.JAPAN, "%.2f倍", rate)
         if (status == message && active == playing && primary.text == action && primary.isEnabled == canAct &&
-            end.isEnabled == canEnd && probe.isEnabled == canProbe) return
+            end.isEnabled == canEnd && probe.isEnabled == canProbe && turnTest.isEnabled == canTestTurn &&
+            speed.text == formatted) return
         status = message
         active = playing
         label.text = message
@@ -193,6 +245,13 @@ internal class FloatingControls(
         end.isEnabled = canEnd
         probe.text = "画面取得テスト"
         probe.isEnabled = canProbe
+        turnTest.text = "ページ送り・復元テスト"
+        turnTest.isEnabled = canTestTurn
+        probe.visibility = if (canProbe) View.VISIBLE else View.GONE
+        turnTest.visibility = if (canTestTurn) View.VISIBLE else View.GONE
+        speed.text = formatted
+        slower.isEnabled = rate > MIN_SPEECH_RATE
+        faster.isEnabled = rate < MAX_SPEECH_RATE
         updateHandle()
         if (expanded && !dragged) reflow()
     }
@@ -203,7 +262,7 @@ internal class FloatingControls(
             else guardParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         if (flags == guardParams.flags) return
         guardParams.flags = flags
-        if (attached) manager.updateViewLayout(guard, guardParams)
+        if (attached && !suspended) manager.updateViewLayout(guard, guardParams)
     }
 
     fun reflow() {
@@ -224,7 +283,7 @@ internal class FloatingControls(
         params.y = y.coerceIn(0, (availableHeight() - params.height).coerceAtLeast(0))
         val right = params.x + params.width
         val bottom = params.y + params.height
-        if (attached && (placed.left != params.x || placed.top != params.y || placed.right != right ||
+        if (attached && !suspended && (placed.left != params.x || placed.top != params.y || placed.right != right ||
                 placed.bottom != bottom)) {
             manager.updateViewLayout(panel, params)
             placed.set(params.x, params.y, right, bottom)

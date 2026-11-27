@@ -99,7 +99,7 @@ class ReaderSessionTest {
         val audio = FakeAudio()
         val session = ReaderSession(duplicate, audio, Pronunciations()) {}
         val outcome = runCatching { session.run() }
-        assertTrue(outcome.exceptionOrNull()?.message.orEmpty().contains("重複"))
+        assertEquals("page_duplicate", (outcome.exceptionOrNull() as? ReaderFailure)?.reason)
         assertEquals(listOf(0, 1), duplicate.decoded)
         assertEquals(listOf("一です。", "二です。"), audio.starts)
         assertFalse(session.restore())
@@ -107,7 +107,8 @@ class ReaderSessionTest {
 
         val stuck = FakePages(listOf(body("一です。")))
         val stuckSession = ReaderSession(stuck, FakeAudio(), Pronunciations()) {}
-        assertTrue(runCatching { stuckSession.run() }.exceptionOrNull()?.message.orEmpty().contains("変わりません"))
+        assertEquals("page_unchanged",
+            (runCatching { stuckSession.run() }.exceptionOrNull() as? ReaderFailure)?.reason)
         assertTrue(stuckSession.restore())
         assertEquals(listOf(true), stuck.turns)
     }
@@ -151,19 +152,37 @@ class ReaderSessionTest {
         assertEquals(listOf("晴れです。"), audio.starts)
     }
 
+    @Test
+    fun uncertainSwipeStopsBeforeAnyOtherGestureAndCannotBeRestoredAutomatically() = runTest {
+        val pages = FakePages(listOf(body("晴れです。"), body("続きです。"))).apply {
+            turnFailure = ReaderFailure("表示が動いています", "page_in_transition")
+        }
+        val audio = FakeAudio()
+        val session = ReaderSession(pages, audio, Pronunciations()) {}
+        val result = runCatching { session.run() }
+        assertEquals("page_in_transition", (result.exceptionOrNull() as? ReaderFailure)?.reason)
+        assertFalse(session.restore())
+        assertEquals(listOf(true), pages.turns)
+        assertEquals(listOf(0), pages.decoded)
+        assertEquals(listOf("晴れです。"), audio.starts)
+    }
+
     private fun body(vararg lines: String) = PageText(lines.map(::SourceLine), PageKind.BODY)
 
     private class FakePages(private val pages: List<PageText>,
                             private val signatures: List<String> = pages.indices.map(Int::toString)) : ReaderPages {
         var display = 0
         var verificationDelay = 0L
+        var turnFailure: ReaderFailure? = null
+        private fun signature(page: Int): PageSignature =
+            PageSignature(ByteArray(120) { (signatures[page].first().code * 53).toByte() })
         var frames = 0
         var closedFrames = 0
         val decoded = mutableListOf<Int>()
         val turns = mutableListOf<Boolean>()
 
         private inner class Frame(val page: Int) : PageFrame {
-            override val signature = signatures[page]
+            override val signature = signature(page)
             override fun close() { closedFrames++ }
         }
 
@@ -173,12 +192,13 @@ class ReaderSessionTest {
             return Frame(display)
         }
 
-        override suspend fun prepareTurn(forward: Boolean, previous: String): suspend () -> PageFrame {
+        override suspend fun prepareTurn(forward: Boolean, previous: PageSignature): suspend () -> PageFrame {
             delay(verificationDelay)
-            if (previous != signatures[display]) throw ReaderFailure("manual movement")
+            if (!previous.matches(signature(display))) throw ReaderFailure("manual movement")
             return {
                 turns += forward
                 delay(55)
+                turnFailure?.let { throw it }
                 display = (display + if (forward) 1 else -1).coerceIn(pages.indices)
                 capture()
             }

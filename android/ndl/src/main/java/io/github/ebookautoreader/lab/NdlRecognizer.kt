@@ -29,6 +29,7 @@ enum class NdlStage { DETECT, RECOGNIZE }
 
 data class NdlProgress(
     val stage: NdlStage, val detected: Int = 0, val total: Int = 0, val done: Int = 0, val skipped: Int = 0,
+    val extendedAtBottom: Int = 0,
 )
 
 class NdlCancellation {
@@ -225,6 +226,20 @@ class NdlRecognizer(directory: File, private val threads: Int = 1) : AutoCloseab
         }
     }
 
+    private fun productCrop(region: NdlRegion, regions: Set<NdlRegion>, height: Int): Rect {
+        val box = region.bounds
+        val width = box.width()
+        if (region.category != 1 || box.height() < width * 2.5 || box.bottom < height * 0.87) return box
+        var bottom = minOf(height, box.bottom + width / 4)
+        for (other in regions) {
+            val next = other.bounds
+            if (next.top >= box.bottom && next.left < box.right && next.right > box.left) {
+                bottom = minOf(bottom, next.top)
+            }
+        }
+        return if (bottom > box.bottom) Rect(box.left, box.top, box.right, bottom) else box
+    }
+
     fun read(
         bitmap: Bitmap,
         textCategories: Set<Int>,
@@ -243,14 +258,17 @@ class NdlRecognizer(directory: File, private val threads: Int = 1) : AutoCloseab
         val candidates = selectText(regions).filterTo(HashSet()) { it.category in textCategories }
         val skipped = regions.count { it.category in textCategories } - candidates.size
         var done = 0
+        var extendedAtBottom = 0
         val planned = NdlProgress(NdlStage.RECOGNIZE, regions.size, candidates.size, skipped = skipped)
         progress(planned)
         return regions.map { region ->
             cancellation.check()
             if (region !in candidates) return@map region
-            val result = recognize(bitmap, region.bounds, measureCertainty = region.category == 10,
+            val crop = if (productLayout) productCrop(region, candidates, bitmap.height) else region.bounds
+            if (crop.bottom > region.bounds.bottom) extendedAtBottom++
+            val result = recognize(bitmap, crop, measureCertainty = region.category == 10,
                 tightRotation = productLayout, cancellation)
-            progress(planned.copy(done = ++done))
+            progress(planned.copy(done = ++done, extendedAtBottom = extendedAtBottom))
             region.copy(text = result.text, certainty = result.certainty, complete = result.complete)
         }
     }

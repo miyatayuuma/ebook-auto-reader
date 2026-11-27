@@ -24,6 +24,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class ReaderActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -63,8 +64,9 @@ class ReaderActivity : Activity() {
             else startActivity(app)
         }
         if (BuildConfig.DEBUG) {
-            button(content, "自作ページで試す") { openFixture(dense = false) }
-            button(content, "文字量の多い自作ページで試す") { openFixture(dense = true) }
+            button(content, "自作ページで試す") { openFixture("join-a") }
+            button(content, "文字量の多い自作ページで試す") { openFixture("body-dense") }
+            button(content, "画面下端の自作ページで試す") { openFixture("body-bottom") }
         }
         content.addView(text("音声設定", 21))
         voices = Spinner(this).also(content::addView)
@@ -73,6 +75,7 @@ class ReaderActivity : Activity() {
         rate = slider(content, "読み上げ速度", selection.rate, 65, 165)
         pitch = slider(content, "声の高さ", selection.pitch, 75, 130)
         preview = button(content, "サンプルを試聴") { audition() }
+        if (BuildConfig.DEBUG) button(content, "音声冒頭を検証（自作）") { audition(exportSample = true) }
         val direction = Switch(this).apply {
             text = "次ページは右方向にスワイプ"
             isChecked = preferences.rightward()
@@ -101,9 +104,9 @@ class ReaderActivity : Activity() {
         }
     }
 
-    private fun openFixture(dense: Boolean) {
+    private fun openFixture(page: String) {
         startActivity(Intent().setClassName(packageName, "${ReaderActivity::class.java.packageName}.FixtureActivity")
-            .putExtra("dense", dense))
+            .putExtra("page", page))
     }
 
     private fun loadVoices() {
@@ -139,15 +142,35 @@ class ReaderActivity : Activity() {
         (65 + rate.progress) / 100f, (75 + pitch.progress) / 100f,
     )
 
-    private fun audition() {
+    private fun audition(exportSample: Boolean = false) {
         if (task?.isActive == true) return
         task = scope.launch {
             preview.isEnabled = false
             try {
                 voiceInfo.text = "試聴中…"
-                speech.synthesize("雨が上がり、窓の向こうに明るい空が広がりました。", settings()) {
+                val selected = settings()
+                val sample = if (exportSample) "はじめの三文字を確認します。青い空に白い雲が流れます。"
+                    else "雨が上がり、窓の向こうに明るい空が広がりました。"
+                speech.synthesize(sample, selected) {
                     voiceInfo.text = "代替の日本語オフライン音声で試聴中…"
-                }.use { playSpeech((it as SpeechFile).file) }
+                }.use { clip ->
+                    val raw = (clip as SpeechFile).file
+                    AudioCache.file(this@ReaderActivity).let(::SpeechFile).use { padded ->
+                        val lead = withContext(Dispatchers.IO) {
+                            val added = WaveLeadIn.prepend(raw, padded.file, (OUTPUT_LEAD_MS * selected.rate).toInt())
+                            if (exportSample && BuildConfig.DEBUG) {
+                                val directory = cacheDir.resolve("diagnostics").apply { mkdirs() }
+                                raw.copyTo(directory.resolve("sample-raw.wav"), overwrite = true)
+                                val played = if (added == null) raw else padded.file
+                                played.copyTo(directory.resolve("sample-played.wav"), overwrite = true)
+                                ReaderDiagnostics.event("playback fixture pcm_raw_onset_ms=${WaveLeadIn.firstSignalMs(raw)}" +
+                                    " pcm_played_onset_ms=${WaveLeadIn.firstSignalMs(played)} rate=${selected.rate}")
+                            }
+                            added
+                        }
+                        playSpeech(if (lead == null) raw else padded.file, rate = { selected.rate }, lead = lead ?: 0)
+                    }
+                }
                 voiceInfo.text = "試聴が完了しました。"
             } catch (error: CancellationException) {
                 throw error

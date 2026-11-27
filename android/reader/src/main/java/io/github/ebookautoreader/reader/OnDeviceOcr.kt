@@ -29,6 +29,7 @@ internal data class OcrProgress(
     val total: Int = 0,
     val done: Int = 0,
     val skipped: Int = 0,
+    val extendedAtBottom: Int = 0,
     val timedOut: Boolean = false,
 ) {
     val label: String get() = when {
@@ -85,7 +86,8 @@ internal class OnDeviceOcr(private val models: File) : AutoCloseable {
         var result = "ok"
         fun finishStage(outcome: String) {
             ReaderDiagnostics.event("ocr stage=${stage.stage} end ms=${SystemClock.elapsedRealtime() - started}" +
-                " detected=${stage.detected} total=${stage.total} done=${stage.done} skipped=${stage.skipped} result=$outcome")
+                " detected=${stage.detected} total=${stage.total} done=${stage.done} skipped=${stage.skipped}" +
+                " extendedAtBottom=${stage.extendedAtBottom} result=$outcome")
         }
         fun publish(next: OcrProgress) {
             if (stage.stage != next.stage) {
@@ -102,17 +104,28 @@ internal class OnDeviceOcr(private val models: File) : AutoCloseable {
             ReaderDiagnostics.event("ocr start width=${image.width} height=${image.height}" +
                 " intra=$THREADS inter=1 cached=${recognizer != null} ${ReaderDiagnostics.memory()}")
             val engine = recognizer ?: openModel()
+            var bottomDetected = 0
+            var bottomSelected = 0
+            fun atBottom(region: Region) = region.box.bottom >= image.height * 0.87
             val regions = engine.read(image, ReflowLayout.textTypes, ReflowLayout.structuralTypes,
                 productLayout = true, cancellation = cancellation, selectText = { detected ->
                     val geometry = detected.associateWith(NdlRegion::toRegion)
                     val selected = ReflowLayout.recognitionCandidates(geometry.values.toList())
+                    bottomDetected = geometry.values.count { it.type in ReflowLayout.textTypes && atBottom(it) }
+                    bottomSelected = selected.count(::atBottom)
                     geometry.keys.filterTo(HashSet()) { geometry.getValue(it) in selected }
                 }, progress = { progress ->
                     val phase = if (progress.stage == NdlStage.DETECT) OcrStage.DETECT else OcrStage.RECOGNIZE
-                    publish(OcrProgress(phase, progress.detected, progress.total, progress.done, progress.skipped))
+                    publish(OcrProgress(phase, progress.detected, progress.total, progress.done,
+                        progress.skipped, progress.extendedAtBottom))
                 })
             publish(stage.copy(stage = OcrStage.LAYOUT))
-            return ReflowLayout.read(regions.map(NdlRegion::toRegion), image.width, image.height, uniformLight)
+            val recognized = regions.map(NdlRegion::toRegion)
+            val bottomRecognized = recognized.count { atBottom(it) && it.complete && it.text.isNotBlank() }
+            ReaderDiagnostics.event("ocr bottom detected=$bottomDetected selected=$bottomSelected recognized=$bottomRecognized")
+            return ReflowLayout.read(recognized, image.width, image.height, uniformLight) { bottomRead ->
+                ReaderDiagnostics.event("ocr bottom retained=$bottomRead")
+            }
         } catch (error: Throwable) {
             result = error.javaClass.simpleName
             throw when (error) {

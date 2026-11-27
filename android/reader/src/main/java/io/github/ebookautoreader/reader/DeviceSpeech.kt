@@ -3,15 +3,19 @@ package io.github.ebookautoreader.reader
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.media.PlaybackParams
 import android.os.Bundle
+import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.Closeable
 import java.io.File
@@ -24,6 +28,9 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+internal const val MIN_SPEECH_RATE = 0.65f
+internal const val MAX_SPEECH_RATE = 1.65f
+internal const val OUTPUT_LEAD_MS = 280
 internal const val GOOGLE_TTS = "com.google.android.tts"
 internal val speechAttributes = AudioAttributes.Builder()
     .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -34,12 +41,14 @@ internal data class SpeechSettings(val voice: String?, val rate: Float = 1f, val
 
 internal class ReaderPreferences(context: Context) {
     private val store = context.getSharedPreferences("reader", Context.MODE_PRIVATE)
-    fun speech() = SpeechSettings(store.getString("voice", null), store.getFloat("rate", 1f),
+    fun speech() = SpeechSettings(store.getString("voice", null), store.getFloat("rate", 1f).coerceIn(MIN_SPEECH_RATE, MAX_SPEECH_RATE),
         store.getFloat("pitch", 1f))
     fun saveSpeech(settings: SpeechSettings) {
         store.edit().putString("voice", settings.voice).putFloat("rate", settings.rate)
             .putFloat("pitch", settings.pitch).apply()
     }
+
+    fun saveRate(rate: Float) { store.edit().putFloat("rate", rate).apply() }
 
     fun rightward() = store.getBoolean("rightward", true)
     fun saveDirection(rightward: Boolean) {
@@ -154,9 +163,9 @@ internal class DeviceSpeech(private val context: Context, private val engine: St
         try {
             for (voice in choices) {
                 if (speech.setVoice(voice) != TextToSpeech.SUCCESS || speech.voice?.name != voice.name) continue
-                if (speech.setSpeechRate(settings.rate) != TextToSpeech.SUCCESS ||
+                if (speech.setSpeechRate(1f) != TextToSpeech.SUCCESS ||
                     speech.setPitch(settings.pitch) != TextToSpeech.SUCCESS) {
-                    throw ReaderFailure("読み上げ速度または声の高さを設定できません。")
+                    throw ReaderFailure("読み上げ音声の声の高さを設定できません。")
                 }
                 val id = UUID.randomUUID().toString()
                 val result = CompletableDeferred<Int>()
@@ -222,21 +231,50 @@ internal class DeviceAudio(
     private val reportSynthesis: (TtsStage?) -> Unit, private val reportPlayback: (Boolean) -> Unit,
     private val fallback: () -> Unit,
 ) : ReaderAudio {
+    private var rate = settings.rate
+    private var player: MediaPlayer? = null
+    private var lastCompleted: Long? = null
+
+    fun setRate(value: Float) {
+        player?.applyRate(value)
+        rate = value
+    }
+
+    fun startOutput() {
+        lastCompleted = null
+    }
+
     override suspend fun synthesize(unit: ReadingUnit): Closeable = try {
         if (unit.noticePage != null) figureNotice()
-        else speech.synthesize(unit.spoken, settings, reportSynthesis, fallback)
+        else {
+            ReaderDiagnostics.event("tts input source_chars=${unit.original.length} spoken_chars=${unit.spoken.length}" +
+                " ranges=${unit.ranges.size} starts_line=${unit.start.offset == 0}")
+            speech.synthesize(unit.spoken, settings, reportSynthesis, fallback)
+        }
     } finally {
         reportSynthesis(null)
     }
 
     override suspend fun play(audio: Closeable, started: () -> Unit, progress: (Int) -> Unit) {
         reportPlayback(true)
+        var padded: File? = null
         try {
-            playSpeech((audio as SpeechFile).file, started = {
-                reportPlayback(false)
-                started()
-            }, progress = progress)
+            val source = (audio as SpeechFile).file
+            val idle = lastCompleted?.let { SystemClock.elapsedRealtime() - it >= 750 } ?: true
+            val lead = if (idle) {
+                val output = AudioCache.file(context).also { padded = it }
+                withContext(Dispatchers.IO) { WaveLeadIn.prepend(source, output, (OUTPUT_LEAD_MS * rate).toInt()) }
+                    ?: 0
+            } else 0
+            if (idle) ReaderDiagnostics.event("playback output_start lead_source_ms=$lead")
+            playSpeech(if (lead > 0) requireNotNull(padded) else source, rate = { rate }, lead = lead,
+                activePlayer = { player = it }, started = {
+                    reportPlayback(false)
+                    started()
+                }, progress = progress)
+            lastCompleted = SystemClock.elapsedRealtime()
         } finally {
+            padded?.delete()
             reportPlayback(false)
         }
     }
@@ -268,7 +306,14 @@ internal class DeviceAudio(
     }
 }
 
-internal suspend fun playSpeech(file: File, started: () -> Unit = {}, progress: (Int) -> Unit = {}) =
+private fun MediaPlayer.applyRate(rate: Float) {
+    playbackParams = PlaybackParams().setSpeed(rate).setPitch(1f)
+}
+
+internal suspend fun playSpeech(
+    file: File, rate: () -> Float = { 1f }, lead: Int = 0, activePlayer: (MediaPlayer?) -> Unit = {},
+    started: () -> Unit = {}, progress: (Int) -> Unit = {},
+) =
     coroutineScope {
         val player = MediaPlayer()
         try {
@@ -288,31 +333,44 @@ internal suspend fun playSpeech(file: File, started: () -> Unit = {}, progress: 
                 }
             } ?: throw ReaderFailure("音声再生の準備が時間内に完了しませんでした。")
             val finished = CompletableDeferred<Unit>()
-            player.setOnCompletionListener { finished.complete(Unit) }
+            player.setOnCompletionListener {
+                activePlayer(null)
+                finished.complete(Unit)
+            }
             player.setOnErrorListener { _, _, _ ->
+                activePlayer(null)
                 finished.completeExceptionally(ReaderFailure("音声の再生に失敗しました。"))
                 true
             }
-            player.start()
+            val duration = player.duration.coerceAtLeast(0)
+            player.applyRate(rate()) // A nonzero speed starts a prepared MediaPlayer.
+            activePlayer(player)
+            var confirmedStart = false
+            fun confirmStart() {
+                if (confirmedStart) return
+                confirmedStart = true
+                started()
+            }
             val tracker = launch {
-                var confirmedStart = false
                 while (true) {
-                    val ms = player.currentPosition
-                    if (!confirmedStart && ms > 0) {
-                        started()
-                        confirmedStart = true
+                    val ms = player.currentPosition - lead
+                    if (ms > 0) {
+                        confirmStart()
+                        progress(ms)
                     }
-                    if (confirmedStart) progress(ms)
                     delay(45)
                 }
             }
             try {
-                withTimeoutOrNull(player.duration.coerceAtLeast(0).toLong() + 12_000) { finished.await() }
+                val deadline = kotlin.math.ceil(duration / MIN_SPEECH_RATE.toDouble()).toLong() + 12_000
+                withTimeoutOrNull(deadline) { finished.await() }
                     ?: throw ReaderFailure("音声の再生が時間内に完了しませんでした。")
+                confirmStart()
             } finally {
                 tracker.cancel()
             }
         } finally {
+            activePlayer(null)
             player.release()
         }
     }

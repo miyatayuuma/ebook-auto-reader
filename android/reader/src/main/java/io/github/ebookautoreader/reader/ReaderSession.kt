@@ -16,11 +16,11 @@ import java.io.Closeable
 internal class ReaderFailure(message: String, val reason: String = "reader_failure") : Exception(message)
 
 internal interface PageFrame : Closeable {
-    val signature: String
+    val signature: PageSignature
 }
 internal interface ReaderPages {
     suspend fun capture(): PageFrame
-    suspend fun prepareTurn(forward: Boolean, previous: String): suspend () -> PageFrame
+    suspend fun prepareTurn(forward: Boolean, previous: PageSignature): suspend () -> PageFrame
     suspend fun read(frame: PageFrame): PageText
 }
 internal interface ReaderAudio {
@@ -45,12 +45,12 @@ internal class ReaderSession(
     pronunciations: Pronunciations,
     private val report: (ReaderState) -> Unit,
 ) {
-    private data class KnownPage(val index: Int, val signature: String)
+    private data class KnownPage(val index: Int, val signature: PageSignature)
     private data class Prepared(val unit: ReadingUnit, val audio: Closeable) : Closeable by audio
 
     private val sentences = SentenceBuffer(pronunciations)
     private val known = mutableMapOf<Int, KnownPage>()
-    private val recent = LinkedHashSet<String>()
+    private val recent = ArrayDeque<PageSignature>()
     private var cursor: KnownPage? = null
     private var decoded = -1
     private var blankPage: Int? = null
@@ -58,6 +58,8 @@ internal class ReaderSession(
     private var queued: ReadingUnit? = null
     private var reachedFailure: ReaderFailure? = null
     private var trusted = true
+    var restoreFailure: ReaderFailure? = null
+        private set
     private var state = ReaderState()
 
     private fun update(value: ReaderState) {
@@ -74,6 +76,7 @@ internal class ReaderSession(
         try {
             while (true) {
                 if (unfinished == null && queued == null && !sentences.hasUnit()) pageTask?.await()
+                if (!trusted && reachedFailure != null) throw requireNotNull(reachedFailure)
                 val unit = unfinished ?: takeNext().also { unfinished = it }
                 if (requireNotNull(cursor).index < unit.start.page) {
                     pageTask?.await()
@@ -222,18 +225,18 @@ internal class ReaderSession(
         known[page.index] = page
         cursor = page
         trusted = true
-        recent.add(page.signature)
-        if (recent.size > 128) recent.remove(recent.first())
+        if (recent.none(page.signature::matches)) recent.addLast(page.signature)
+        if (recent.size > 128) recent.removeFirst()
         update(state.copy(displayed = page.index))
     }
 
     private suspend fun checkedCapture(expected: KnownPage): PageFrame {
         val frame = pages.capture()
-        if (frame.signature == expected.signature) return frame
+        if (frame.signature.matches(expected.signature)) return frame
         frame.close()
         trusted = false
         update(state.copy(displayed = null))
-        throw ReaderFailure("表示ページが変わりました。自動操作を停止しました。")
+        throw ReaderFailure("表示ページが変わりました。自動操作を停止しました。", "page_position_changed")
     }
 
     private suspend fun verifyCursor(): Boolean {
@@ -243,6 +246,7 @@ internal class ReaderSession(
 
     private suspend fun move(forward: Boolean, target: Int): PageFrame {
         currentCoroutineContext().ensureActive()
+        if (!trusted) throw reachedFailure ?: ReaderFailure("表示位置を確認できません。", "page_position_unknown")
         val from = requireNotNull(cursor)
         val expected = known[target]
         val turn = try {
@@ -258,18 +262,23 @@ internal class ReaderSession(
             withContext(NonCancellable) {
                 trusted = false
                 update(state.copy(displayed = null))
-                val frame = withTimeoutOrNull(4_000) { turn() }
-                    ?: throw ReaderFailure("ページ遷移の確認が時間内に完了しませんでした。")
+                val frame = withTimeoutOrNull(8_000) { turn() }
+                    ?: throw ReaderFailure("ページ遷移の確認が時間内に完了しませんでした。", "page_in_transition")
                 result = frame
-                val matches = if (expected != null) frame.signature == expected.signature
-                    else forward && frame.signature !in recent
-                if (frame.signature == from.signature) {
-                    // The source confirmed two stable captures with the original signature.
+                val matches = if (expected != null) frame.signature.matches(expected.signature)
+                    else forward && recent.all { frame.signature.compare(it) == PageComparison.DIFFERENT }
+                if (frame.signature.matches(from.signature)) {
+                    // The source confirmed stable captures with the original page.
                     trusted = true
                     update(state.copy(displayed = from.index))
-                    throw ReaderFailure("ページが変わりませんでした。巻末または操作方向を確認してください。")
+                    throw ReaderFailure("ページが変わりませんでした。巻末か、手動でページが送れるか確認してください。", "page_unchanged")
                 }
-                if (!matches) throw ReaderFailure("ページの重複または表示位置の不一致を検出しました。")
+                if (!matches) {
+                    if (recent.any(frame.signature::matches) && expected == null) {
+                        throw ReaderFailure("以前と同じページが表示されたため停止しました。", "page_duplicate")
+                    }
+                    throw ReaderFailure("送り先のページを確認できません。表示位置を確認してください。", "page_position_unknown")
+                }
                 register(KnownPage(target, frame.signature))
             }
             currentCoroutineContext().ensureActive()
@@ -281,7 +290,11 @@ internal class ReaderSession(
     }
 
     suspend fun restore(): Boolean {
-        if (!trusted) return false
+        restoreFailure = null
+        if (!trusted) {
+            restoreFailure = reachedFailure
+            return false
+        }
         val from = cursor ?: return true
         val target = state.confirmed?.page ?: 0
         val destination = if (from.index >= target) target..from.index else from.index..target
@@ -296,7 +309,8 @@ internal class ReaderSession(
                 move(forward, index).close()
             }
             true
-        } catch (_: ReaderFailure) {
+        } catch (error: ReaderFailure) {
+            restoreFailure = error
             false
         } catch (error: CancellationException) {
             throw error

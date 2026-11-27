@@ -32,7 +32,18 @@ internal object ReflowLayout {
     private fun ignored(regions: List<Region>) = regions.filter { it.type in setOf(8, 9) && it.detection >= 0.6f }
 
     private fun coveredByHeaderOrFooter(region: Region, ignored: List<Region>) =
-        ignored.any { region.box.intersection(it.box) >= region.box.area * 0.85 }
+        ignored.any {
+            val verticalBody = region.type == 1 && region.box.height >= region.box.width * 2.5
+            region.box.intersection(it.box) >= region.box.area * 0.85 &&
+                !(it.type == 9 && verticalBody)
+        }
+
+    private fun isFolio(region: Region, width: Int, height: Int): Boolean {
+        val text = region.text.trim()
+        return !region.vertical && region.box.top >= height * 0.9 &&
+            region.box.height <= height * 0.035 && region.box.width <= width * 0.12 &&
+            text.length in 1..5 && text.all { it.isDigit() }
+    }
 
     fun recognitionCandidates(regions: List<Region>): Set<Region> {
         val ignored = ignored(regions)
@@ -45,7 +56,10 @@ internal object ReflowLayout {
         }
     }
 
-    fun read(regions: List<Region>, width: Int, height: Int, uniformLight: Boolean): PageText {
+    fun read(
+        regions: List<Region>, width: Int, height: Int, uniformLight: Boolean,
+        reportBottomLines: (Int) -> Unit = {},
+    ): PageText {
         val rubyCandidates = regions.filter { it.type == 10 && it.detection >= 0.35f &&
             it.certainty >= 0.65f && it.complete && it.text.isReading() }
         val ignored = ignored(regions)
@@ -56,7 +70,7 @@ internal object ReflowLayout {
                 .thenByDescending { it.detection })
         for (candidate in candidates) {
             val box = candidate.box
-            if (coveredByHeaderOrFooter(candidate, ignored)) continue
+            if (coveredByHeaderOrFooter(candidate, ignored) || isFolio(candidate, width, height)) continue
             if (rubyCandidates.any {
                     maxOf(box.area, it.box.area) * 0.85 <= box.intersection(it.box)
                 }) continue
@@ -66,7 +80,7 @@ internal object ReflowLayout {
         val substantive = lines.filter { it.type == 1 || it.type == 16 }
         if (substantive.any { !it.complete || it.text.isBlank() } ||
             substantive.isNotEmpty() && substantive.none { hasJapanese(it.text) }) {
-            throw ReaderFailure("本文候補の一部を認識できません。表示と文字サイズを確認してください。")
+            throw ReaderFailure("本文候補の一部を認識できません。表示と文字サイズを確認してください。", "ocr_incomplete_body")
         }
         val captions = lines.filter { it.type in setOf(2, 4, 5) && it.complete && hasJapanese(it.text) }
         val figure = regions.any { it.type in visualTypes && it.detection >= 0.68f &&
@@ -85,6 +99,7 @@ internal object ReflowLayout {
             ruby.getOrPut(parent) { mutableListOf() }.add(reading)
         }
         val ordered = order(substantive) + order(captions)
+        reportBottomLines(ordered.count { it.box.bottom >= height * 0.87 })
         return PageText(ordered.map { SourceLine(it.text, ruby[it].orEmpty()) }, kind)
     }
 

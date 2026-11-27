@@ -45,6 +45,13 @@ DENSE = [
 ]
 
 
+BOTTOM = [
+    "速い風が吹き、川の向こうで細い葦が揺れた。空音は両手で白い帽子を押さえ、前を向いた。ここから先は静かな森だ。",
+    "石段の影には、赤い実がいくつも落ちていた。ひとつ拾うと、真ん中に黒い点があった。空音は実をそっと地面へ戻した。",
+    "遠くで鳥が鳴き、森の奥から友だちの声がした。返事をすると、木々の間から明るい光が差した。",
+]
+
+
 def render(root, font_path, font_index, dense=False):
     if not features.check_feature("raqm"):
         raise RuntimeError("Pillow with libraqm support is required for vertical glyphs")
@@ -52,7 +59,8 @@ def render(root, font_path, font_index, dense=False):
     image_dir.mkdir(parents=True, exist_ok=True)
     references = {}
 
-    def page(key, kind, size, columns=(), graph=False, folio=None, ruby=False, column_pitch=None):
+    def page(key, kind, size, columns=(), graph=False, folio=None, ruby=False, column_pitch=None,
+             start_y=200):
         image = Image.new("RGB", (1080, 2424), "#fffdf8")
         draw = ImageDraw.Draw(image)
         regions = []
@@ -68,9 +76,9 @@ def render(root, font_path, font_index, dense=False):
         for index, column in enumerate(columns):
             x = 950 - index * step
             role = "heading" if kind == "chapter" else "body"
-            label(x, 200, column, size, role, True)
+            label(x, start_y, column, size, role, True)
             if ruby and index == 1:
-                label(x + int(size * 1.08), 200, "あおね", max(11, size // 2), "ruby", True,
+                label(x + int(size * 1.08), start_y, "あおね", max(11, size // 2), "ruby", True,
                       parentRegion=len(regions) - 1, surface="空音")
         if graph:
             left, top, right, bottom = 150, 1750, 855, 2020
@@ -88,6 +96,7 @@ def render(root, font_path, font_index, dense=False):
         page(f"body-{suffix}", "mixed", size, BODY, graph=True, folio="12", ruby=True)
     if dense:
         page("body-dense", "body", 32, DENSE, folio="14", ruby=True, column_pitch=49)
+        page("body-bottom", "body", 41, BOTTOM, folio="27", start_y=155)
     page("chapter", "chapter", 66, ["第二章　橋の向こう"], folio="13")
     page("figure", "figure", 34, graph=True)
     page("blank", "blank", 34)

@@ -35,6 +35,24 @@ class ReflowLayoutTest {
     }
 
     @Test
+    fun bottomVerticalBodySurvivesFooterOverlapAndFolioStaysOutOfSpeech() {
+        val line = Region(Box(360, 500, 385, 690), 1, .95f, "橋を渡りきった。")
+        val previous = Region(Box(415, 35, 445, 460), 1, .91f, "朝の光が差した。")
+        val footer = Region(Box(310, 495, 390, 693), 9, .80f)
+        val folio = Region(Box(240, 660, 267, 678), 1, .90f, "２７")
+        val regions = listOf(line, previous, footer, folio)
+        assertTrue(line in ReflowLayout.recognitionCandidates(regions))
+        var atBottom = -1
+        val page = ReflowLayout.read(regions, 520, 700, false) { atBottom = it }
+        assertEquals(listOf("朝の光が差した。", "橋を渡りきった。"), page.lines.map { it.original })
+        assertEquals(1, atBottom)
+        val buffer = SentenceBuffer(Pronunciations())
+        buffer.add(0, page)
+        assertEquals("朝の光が差した。", buffer.poll()?.spoken)
+        assertEquals("橋を渡りきった。", buffer.poll()?.spoken)
+    }
+
+    @Test
     fun pageKindNeedsPositiveEvidenceAndKeepsHeadingAndFigureCaption() {
         assertEquals(PageKind.BLANK, ReflowLayout.read(emptyList(), 500, 700, true).kind)
         assertThrows(ReaderFailure::class.java) { ReflowLayout.read(emptyList(), 500, 700, false) }

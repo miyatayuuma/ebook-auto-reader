@@ -1,4 +1,4 @@
-# P2.1 Pixel 9での確認
+# P2.2 Pixel 9での確認
 
 対象はPixel 9／Android 17のGoogle Play版DMMブックスと日本語縦書きリフロー本文です。DMMブックスの実画面を端末で取得できるかを最初に確認します。Androidのウィンドウ単位の画面取得が保護画面を返した場合は停止します。画像と文字認識結果はセッション中のメモリに置き、合成音声はアプリの一時領域から再生後に削除します。 [Android画面取得API](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService#takeScreenshotOfWindow(int,java.util.concurrent.Executor,android.accessibilityservice.AccessibilityService.TakeScreenshotCallback))
 
@@ -20,9 +20,34 @@ bash p2/install-debug.sh --run RUN_ID
 2. DMMで縦書きリフロー本文を開き、メニューを閉じます。画面端の **▶** をタップして **画面取得テスト** を押します。
 3. 「画面取得に成功」が表示されたときは次の手順へ進みます。制限、黒画面、取得失敗が表示されたときは、その結果を記録してください。
 
-管理PCには `adb`、`gh`（Actionsから取得する場合）、`keytool`、`openssl` と Android SDK Build Tools 35.0.0 の `apksigner` が必要です。CI APKを管理PCで専用のデバッグ鍵に署名し直して導入します。鍵の既定の保存先は `~/.local/share/ebook-auto-reader/` です。既に導入済みの場合は同じ管理PC・同じ鍵で `bash p2/install-debug.sh --apk ~/Downloads/EbookAutoReader-P2.1.apk` を実行します。別の鍵ディレクトリを使用していた場合は、同じ `P2_SIGNING_DIR` を指定します。スクリプトは `adb install -r` で更新し、端末のモデルはサイズ・SHA-256が一致すれば再利用します。P1の `io.github.ebookautoreader.lab` とP2デバッグ版の `io.github.ebookautoreader.debug` は別アプリです。
+管理PCには `adb`、`gh`（Actionsから取得する場合）、`keytool`、`openssl` と Android SDK Build Tools 35.0.0 の `apksigner` が必要です。CI APKを管理PCで専用のデバッグ鍵に署名し直して導入します。鍵の既定の保存先は `~/.local/share/ebook-auto-reader/` です。既に導入済みの場合は同じ管理PC・同じ鍵で `bash p2/install-debug.sh --apk ~/Downloads/EbookAutoReader-P2.2.apk` を実行します。別の鍵ディレクトリを使用していた場合は、同じ `P2_SIGNING_DIR` を指定します。スクリプトは `adb install -r` で更新し、端末のモデルはサイズ・SHA-256が一致すれば再利用します。P1の `io.github.ebookautoreader.lab` とP2デバッグ版の `io.github.ebookautoreader.debug` は別アプリです。
 
-## 2. 自作ページとDMMで再生を確認
+## P2.2の実機受入
+
+1. TalkBackなどのタッチガイドを停止し、DMMの書籍の途中でメニューを閉じます。展開した操作パネルの **ページ送り・復元テスト** を押します。OCR・音声合成なしで、設定方向へ1回送り、元ページへの復元を確認します。左右どちらのパネル配置でも確認できます。目視でページ番号が1つ進んだことも確認してください。逆向きならアプリ設定の「次ページは右方向にスワイプ」を切り替えます。
+2. **読み上げ開始** から5〜10ページを聴き、飛ばし・重複とページ境界の文の分断がないことを確認します。自作ページでは最初の「夜が明けると、川岸の石は朝の光を反射し、水の流れが銀色に見えた。」がページをまたぐ一文です。
+3. **画面下端の自作ページで試す** では2列目の「空音は実をそっと地面へ戻した。」まで聞こえ、下部のページ番号「27」を読まないことを確認します。一度終了し、本文中央をタップしてメニューを開き、読み上げ開始が「メニューを閉じてから再開」で止まることを確認します。DMMでも同じ比較をします。
+4. 読み上げ中にパネルを開き、**−**／**＋** を押します。今の文の途中で速度が変わり、次文・次ページ・再起動後にも保持されることを確認します。ステップは0.10倍、範囲は0.65〜1.65倍です。
+5. スピーカーと普段使うBluetooth機器で、**音声冒頭を検証（自作）** の「はじめの三文字を確認します。」が冒頭から聞こえることを確認します。実際の出力を比較する場合は別端末で試聴音を録音し、下記の自作WAVと聴き比べます。
+6. 先読みで次ページが表示された時点で一時停止・再開・終了を試し、停止時に読み上げ位置のページへ戻ることと、再開が文頭からであることを確認します。
+
+ページ送り診断では、タッチガードと操作パネルをAndroidのウィンドウから一時的に外し、2フレームを待ってから、画面中央の高さで幅60%を270msで1本指スワイプします。Android側の入力完了は `gesture android_result=completed`、本文の変化は `page turn result=page_changed`、復元までの成功は `page turn test result=round_trip_ok` です。`page_unchanged`、`page_in_transition`、`page_duplicate`、`window_changed` を区別します。ページ送りの自動再試行は行いません。
+
+下端欠落の調査には `capture size=… window_size=…`、`ocr bottom detected=… selected=… recognized=…`、`ocr bottom retained=…`、`extendedAtBottom=…` を使います。認識に渡す画像はウィンドウ全体です。メニューは下部のスライダー・ボタンや画像上の帯を検出し、認識前に停止します。
+
+音声冒頭の検証ボタンで生成した自作WAVは次のコマンドで取得できます。購入書籍から作った音声はこの診断の対象外です。ログの `pcm_raw_onset_ms` と `pcm_played_onset_ms` はWAV内の信号開始位置です。音声の聞こえ方は実際の出力の録音や試聴で判定してください。
+
+```bash
+adb shell -T run-as io.github.ebookautoreader.debug cat cache/diagnostics/sample-raw.wav > sample-raw.wav
+adb shell -T run-as io.github.ebookautoreader.debug cat cache/diagnostics/sample-played.wav > sample-played.wav
+adb logcat -v threadtime -s EbookReader:I
+```
+
+### WorkでのOCR確認
+
+公式モデルと製品のKotlin認識・レイアウト処理をLinux x86_64上で実行しました。下端の自作ページは3列153字を出力し、下端付近の2列の末尾も一致しました。ノンブルは除外し、本文中に1字の置換がありました。画面下端に向けた切り出し拡張の有無で列数・文字数と末尾の結果は一致しました。高密度ページは18列887字、ページまたぎ用の2枚は各2列を認識しました。DMM実画面でのメニュー検出と音声経路はPixel 9で確認します。
+
+## 2. P2.1からの導入・操作確認
 
 画面取得だけを確認した場合は、同じコマンドから `--probe-only` を外してモデルを導入します。
 
