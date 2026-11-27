@@ -1,0 +1,437 @@
+[
+  {
+    "metadata": {
+      "engine": "NDLOCR-Lite 2.0.0 PC CLI",
+      "system": "x86_64",
+      "timing": "single-page cold process after download"
+    },
+    "byRole": {
+      "body": {
+        "chars": 611,
+        "errors": 1,
+        "substitutions": 1,
+        "deletions": 0,
+        "insertions": 0,
+        "cer": 0.00164
+      },
+      "ruby": {
+        "chars": 9,
+        "errors": 9,
+        "substitutions": 0,
+        "deletions": 9,
+        "insertions": 0,
+        "cer": 1.0
+      },
+      "caption": {
+        "chars": 48,
+        "errors": 0,
+        "substitutions": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "cer": 0.0
+      },
+      "folio": {
+        "chars": 8,
+        "errors": 8,
+        "substitutions": 0,
+        "deletions": 8,
+        "insertions": 0,
+        "cer": 1.0
+      },
+      "heading": {
+        "chars": 8,
+        "errors": 0,
+        "substitutions": 0,
+        "deletions": 0,
+        "insertions": 0,
+        "cer": 0.0
+      }
+    },
+    "totals": {
+      "medianMs": 7085.0,
+      "maxMs": 7580.0,
+      "bodyOrderInversions": 0,
+      "rubyReadingCorrect": 0,
+      "rubyLinksCorrect": 0,
+      "rubyTotal": 3
+    },
+    "pages": {
+      "body-small": {
+        "kind": "mixed",
+        "fontPixels": 22,
+        "elapsedMs": 7240.0,
+        "peakRssKiB": 715076,
+        "byRole": {
+          "body": {
+            "chars": 188,
+            "errors": 0,
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0
+          },
+          "ruby": {
+            "chars": 3,
+            "errors": 3,
+            "substitutions": 0,
+            "deletions": 3,
+            "insertions": 0
+          },
+          "caption": {
+            "chars": 12,
+            "errors": 0,
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0
+          },
+          "folio": {
+            "chars": 2,
+            "errors": 2,
+            "substitutions": 0,
+            "deletions": 2,
+            "insertions": 0
+          }
+        },
+        "expectedBody": "水面には、夜明けの雲が薄く映っていた。空音は橋を渡り、記録帳をそっと開いた。古い温度計の針は、まだ動いていない。「待とう」と言って、風の向きを記した。頁の端に、小さな印をひとつだけ付けた。やがて石英のかけらが淡い光を返した。細い道をたどると、図書館の扉が見えた。光の強さと影の長さを一行ずつ比べた。文字を急いで写すと、読点を落としやすい。夕方の鐘が鳴る前に、静かな通りへ出た。",
+        "associatedBody": "水面には、夜明けの雲が薄く映っていた。空音は橋を渡り、記録帳をそっと開いた。古い温度計の針は、まだ動いていない。「待とう」と言って、風の向きを記した。頁の端に、小さな印をひとつだけ付けた。やがて石英のかけらが淡い光を返した。細い道をたどると、図書館の扉が見えた。光の強さと影の長さを一行ずつ比べた。文字を急いで写すと、読点を落としやすい。夕方の鐘が鳴る前に、静かな通りへ出た。",
+        "rawText": "水面には、夜明けの雲が薄く映っていた。空音は橋を渡り、記録帳をそっと開いた。古い温度計の針は、まだ動いていない。「待とう」と言って、風の向きを記した。頁の端に、小さな印をひとつだけ付けた。やがて石英のかけらが淡い光を返した。細い道をたどると、図書館の扉が見えた。光の強さと影の長さを一行ずつ比べた。文字を急いで写すと、読点を落としやすい。夕方の鐘が鳴る前に、静かな通りへ出た。図光の強さ注縦軸は相対値",
+        "regionMatches": 12,
+        "unmatchedLines": 0,
+        "missingBodyRegions": 0,
+        "orderInversions": 0,
+        "ruby": [
+          {
+            "surface": "空音",
+            "readingCorrect": false,
+            "linkCorrect": false
+          }
+        ],
+        "bodyInEngineOrder": {
+          "chars": 188,
+          "errors": 0,
+          "substitutions": 0,
+          "deletions": 0,
+          "insertions": 0
+        },
+        "rawReadout": {
+          "chars": 188,
+          "errors": 12,
+          "substitutions": 0,
+          "deletions": 0,
+          "insertions": 12
+        }
+      },
+      "body-medium": {
+        "kind": "mixed",
+        "fontPixels": 34,
+        "elapsedMs": 7260.0,
+        "peakRssKiB": 715580,
+        "byRole": {
+          "body": {
+            "chars": 188,
+            "errors": 1,
+            "substitutions": 1,
+            "deletions": 0,
+            "insertions": 0
+          },
+          "ruby": {
+            "chars": 3,
+            "errors": 3,
+            "substitutions": 0,
+            "deletions": 3,
+            "insertions": 0
+          },
+          "caption": {
+            "chars": 12,
+            "errors": 0,
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0
+          },
+          "folio": {
+            "chars": 2,
+            "errors": 2,
+            "substitutions": 0,
+            "deletions": 2,
+            "insertions": 0
+          }
+        },
+        "expectedBody": "水面には、夜明けの雲が薄く映っていた。空音は橋を渡り、記録帳をそっと開いた。古い温度計の針は、まだ動いていない。「待とう」と言って、風の向きを記した。頁の端に、小さな印をひとつだけ付けた。やがて石英のかけらが淡い光を返した。細い道をたどると、図書館の扉が見えた。光の強さと影の長さを一行ずつ比べた。文字を急いで写すと、読点を落としやすい。夕方の鐘が鳴る前に、静かな通りへ出た。",
+        "associatedBody": "水面には、夜明けの雲が薄く映っていた。空音は橋を渡り、記録帳をそっと開いた。古い温度計の針は、まだ動いていない。「待とう」と言って、風の向きを記した。貞の端に、小さな印をひとつだけ付けた。やがて石英のかけらが淡い光を返した。細い道をたどると、図書館の扉が見えた。光の強さと影の長さを一行ずつ比べた。文字を急いで写すと、読点を落としやすい。夕方の鐘が鳴る前に、静かな通りへ出た。",
+        "rawText": "水面には、夜明けの雲が薄く映っていた。空音は橋を渡り、記録帳をそっと開いた。古い温度計の針は、まだ動いていない。「待とう」と言って、風の向きを記した。貞の端に、小さな印をひとつだけ付けた。やがて石英のかけらが淡い光を返した。細い道をたどると、図書館の扉が見えた。光の強さと影の長さを一行ずつ比べた。文字を急いで写すと、読点を落としやすい。夕方の鐘が鳴る前に、静かな通りへ出た。図光の強さ注縦軸は相対値",
+        "regionMatches": 12,
+        "unmatchedLines": 0,
+        "missingBodyRegions": 0,
+        "orderInversions": 0,
+        "ruby": [
+          {
+            "surface": "空音",
+            "readingCorrect": false,
+            "linkCorrect": false
+          }
+        ],
+        "bodyInEngineOrder": {
+          "chars": 188,
+          "errors": 1,
+          "substitutions": 1,
+          "deletions": 0,
+          "insertions": 0
+        },
+        "rawReadout": {
+          "chars": 188,
+          "errors": 13,
+          "substitutions": 1,
+          "deletions": 0,
+          "insertions": 12
+        }
+      },
+      "body-large": {
+        "kind": "mixed",
+        "fontPixels": 48,
+        "elapsedMs": 7190.0,
+        "peakRssKiB": 720448,
+        "byRole": {
+          "body": {
+            "chars": 188,
+            "errors": 0,
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0
+          },
+          "ruby": {
+            "chars": 3,
+            "errors": 3,
+            "substitutions": 0,
+            "deletions": 3,
+            "insertions": 0
+          },
+          "caption": {
+            "chars": 12,
+            "errors": 0,
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0
+          },
+          "folio": {
+            "chars": 2,
+            "errors": 2,
+            "substitutions": 0,
+            "deletions": 2,
+            "insertions": 0
+          }
+        },
+        "expectedBody": "水面には、夜明けの雲が薄く映っていた。空音は橋を渡り、記録帳をそっと開いた。古い温度計の針は、まだ動いていない。「待とう」と言って、風の向きを記した。頁の端に、小さな印をひとつだけ付けた。やがて石英のかけらが淡い光を返した。細い道をたどると、図書館の扉が見えた。光の強さと影の長さを一行ずつ比べた。文字を急いで写すと、読点を落としやすい。夕方の鐘が鳴る前に、静かな通りへ出た。",
+        "associatedBody": "水面には、夜明けの雲が薄く映っていた。空音は橋を渡り、記録帳をそっと開いた。古い温度計の針は、まだ動いていない。「待とう」と言って、風の向きを記した。頁の端に、小さな印をひとつだけ付けた。やがて石英のかけらが淡い光を返した。細い道をたどると、図書館の扉が見えた。光の強さと影の長さを一行ずつ比べた。文字を急いで写すと、読点を落としやすい。夕方の鐘が鳴る前に、静かな通りへ出た。",
+        "rawText": "水面には、夜明けの雲が薄く映っていた。空音は橋を渡り、記録帳をそっと開いた。古い温度計の針は、まだ動いていない。「待とう」と言って、風の向きを記した。頁の端に、小さな印をひとつだけ付けた。やがて石英のかけらが淡い光を返した。細い道をたどると、図書館の扉が見えた。光の強さと影の長さを一行ずつ比べた。文字を急いで写すと、読点を落としやすい。夕方の鐘が鳴る前に、静かな通りへ出た。図光の強さ注縦軸は相対値",
+        "regionMatches": 12,
+        "unmatchedLines": 0,
+        "missingBodyRegions": 0,
+        "orderInversions": 0,
+        "ruby": [
+          {
+            "surface": "空音",
+            "readingCorrect": false,
+            "linkCorrect": false
+          }
+        ],
+        "bodyInEngineOrder": {
+          "chars": 188,
+          "errors": 0,
+          "substitutions": 0,
+          "deletions": 0,
+          "insertions": 0
+        },
+        "rawReadout": {
+          "chars": 188,
+          "errors": 12,
+          "substitutions": 0,
+          "deletions": 0,
+          "insertions": 12
+        }
+      },
+      "chapter": {
+        "kind": "chapter",
+        "fontPixels": 66,
+        "elapsedMs": 7580.0,
+        "peakRssKiB": 676976,
+        "byRole": {
+          "heading": {
+            "chars": 8,
+            "errors": 0,
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0
+          },
+          "folio": {
+            "chars": 2,
+            "errors": 2,
+            "substitutions": 0,
+            "deletions": 2,
+            "insertions": 0
+          }
+        },
+        "expectedBody": "第二章　橋の向こう",
+        "associatedBody": "第二章橋の向こう",
+        "rawText": "第二章橋の向こう",
+        "regionMatches": 1,
+        "unmatchedLines": 0,
+        "missingBodyRegions": 0,
+        "orderInversions": 0,
+        "ruby": [],
+        "bodyInEngineOrder": {
+          "chars": 8,
+          "errors": 0,
+          "substitutions": 0,
+          "deletions": 0,
+          "insertions": 0
+        },
+        "rawReadout": {
+          "chars": 8,
+          "errors": 0,
+          "substitutions": 0,
+          "deletions": 0,
+          "insertions": 0
+        }
+      },
+      "figure": {
+        "kind": "figure",
+        "fontPixels": 34,
+        "elapsedMs": 6870.0,
+        "peakRssKiB": 679576,
+        "byRole": {
+          "caption": {
+            "chars": 12,
+            "errors": 0,
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0
+          }
+        },
+        "expectedBody": "",
+        "associatedBody": "",
+        "rawText": "図光の強さ注縦軸は相対値",
+        "regionMatches": 2,
+        "unmatchedLines": 0,
+        "missingBodyRegions": 0,
+        "orderInversions": 0,
+        "ruby": [],
+        "bodyInEngineOrder": {
+          "chars": 0,
+          "errors": 0,
+          "substitutions": 0,
+          "deletions": 0,
+          "insertions": 0
+        },
+        "rawReadout": {
+          "chars": 0,
+          "errors": 12,
+          "substitutions": 0,
+          "deletions": 0,
+          "insertions": 12
+        }
+      },
+      "blank": {
+        "kind": "blank",
+        "fontPixels": 34,
+        "elapsedMs": 6980.0,
+        "peakRssKiB": 664584,
+        "byRole": {},
+        "expectedBody": "",
+        "associatedBody": "",
+        "rawText": "",
+        "regionMatches": 0,
+        "unmatchedLines": 0,
+        "missingBodyRegions": 0,
+        "orderInversions": 0,
+        "ruby": [],
+        "bodyInEngineOrder": {
+          "chars": 0,
+          "errors": 0,
+          "substitutions": 0,
+          "deletions": 0,
+          "insertions": 0
+        },
+        "rawReadout": {
+          "chars": 0,
+          "errors": 0,
+          "substitutions": 0,
+          "deletions": 0,
+          "insertions": 0
+        }
+      },
+      "join-a": {
+        "kind": "body",
+        "fontPixels": 34,
+        "elapsedMs": 6980.0,
+        "peakRssKiB": 683380,
+        "byRole": {
+          "body": {
+            "chars": 20,
+            "errors": 0,
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0
+          }
+        },
+        "expectedBody": "夜が明けると、川岸の石は朝の光を反射し、",
+        "associatedBody": "夜が明けると、川岸の石は朝の光を反射し、",
+        "rawText": "夜が明けると、川岸の石は朝の光を反射し、",
+        "regionMatches": 2,
+        "unmatchedLines": 0,
+        "missingBodyRegions": 0,
+        "orderInversions": 0,
+        "ruby": [],
+        "bodyInEngineOrder": {
+          "chars": 20,
+          "errors": 0,
+          "substitutions": 0,
+          "deletions": 0,
+          "insertions": 0
+        },
+        "rawReadout": {
+          "chars": 20,
+          "errors": 0,
+          "substitutions": 0,
+          "deletions": 0,
+          "insertions": 0
+        }
+      },
+      "join-b": {
+        "kind": "body",
+        "fontPixels": 34,
+        "elapsedMs": 6950.0,
+        "peakRssKiB": 683084,
+        "byRole": {
+          "body": {
+            "chars": 27,
+            "errors": 0,
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0
+          }
+        },
+        "expectedBody": "水の流れが銀色に見えた。しばらく橋の上で立ち止まった。",
+        "associatedBody": "水の流れが銀色に見えた。しばらく橋の上で立ち止まった。",
+        "rawText": "水の流れが銀色に見えた。しばらく橋の上で立ち止まった。",
+        "regionMatches": 2,
+        "unmatchedLines": 0,
+        "missingBodyRegions": 0,
+        "orderInversions": 0,
+        "ruby": [],
+        "bodyInEngineOrder": {
+          "chars": 27,
+          "errors": 0,
+          "substitutions": 0,
+          "deletions": 0,
+          "insertions": 0
+        },
+        "rawReadout": {
+          "chars": 27,
+          "errors": 0,
+          "substitutions": 0,
+          "deletions": 0,
+          "insertions": 0
+        }
+      }
+    }
+  }
+]

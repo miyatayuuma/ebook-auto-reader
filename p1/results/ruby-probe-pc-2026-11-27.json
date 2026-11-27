@@ -1,0 +1,44 @@
+[
+  {
+    "page": "body-small",
+    "expected": "あおね",
+    "oracleCrop": "あおね",
+    "oracleCorrect": true,
+    "candidates": [
+      {
+        "kind": "block_rubi",
+        "reading": "あおね",
+        "confidence": 0.5834888219833374
+      }
+    ],
+    "detectorMs": 823.1
+  },
+  {
+    "page": "body-medium",
+    "expected": "あおね",
+    "oracleCrop": "あおね",
+    "oracleCorrect": true,
+    "candidates": [
+      {
+        "kind": "block_rubi",
+        "reading": "あおね",
+        "confidence": 0.7688393592834473
+      }
+    ],
+    "detectorMs": 826.5
+  },
+  {
+    "page": "body-large",
+    "expected": "あおね",
+    "oracleCrop": "あおね",
+    "oracleCorrect": true,
+    "candidates": [
+      {
+        "kind": "block_rubi",
+        "reading": "あおね",
+        "confidence": 0.7922272086143494
+      }
+    ],
+    "detectorMs": 804.8
+  }
+]
