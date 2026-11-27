@@ -29,10 +29,26 @@ internal object ReflowLayout {
     val structuralTypes = setOf(0, 3, 6, 7, 8, 9, 11, 12, 13, 14, 15)
     private val visualTypes = setOf(6, 11, 15)
 
+    private fun ignored(regions: List<Region>) = regions.filter { it.type in setOf(8, 9) && it.detection >= 0.6f }
+
+    private fun coveredByHeaderOrFooter(region: Region, ignored: List<Region>) =
+        ignored.any { region.box.intersection(it.box) >= region.box.area * 0.85 }
+
+    fun recognitionCandidates(regions: List<Region>): Set<Region> {
+        val ignored = ignored(regions)
+        return regions.filterTo(HashSet()) {
+            when (it.type) {
+                10 -> it.detection >= 0.35f
+                in textTypes -> !coveredByHeaderOrFooter(it, ignored)
+                else -> false
+            }
+        }
+    }
+
     fun read(regions: List<Region>, width: Int, height: Int, uniformLight: Boolean): PageText {
         val rubyCandidates = regions.filter { it.type == 10 && it.detection >= 0.35f &&
             it.certainty >= 0.65f && it.complete && it.text.isReading() }
-        val ignored = regions.filter { it.type in setOf(8, 9) && it.detection >= 0.6f }
+        val ignored = ignored(regions)
 
         val lines = mutableListOf<Region>()
         val candidates = regions.filter { it.type in setOf(1, 2, 4, 5, 16) }
@@ -40,7 +56,7 @@ internal object ReflowLayout {
                 .thenByDescending { it.detection })
         for (candidate in candidates) {
             val box = candidate.box
-            if (ignored.any { box.intersection(it.box) >= box.area * 0.85 }) continue
+            if (coveredByHeaderOrFooter(candidate, ignored)) continue
             if (rubyCandidates.any {
                     maxOf(box.area, it.box.area) * 0.85 <= box.intersection(it.box)
                 }) continue

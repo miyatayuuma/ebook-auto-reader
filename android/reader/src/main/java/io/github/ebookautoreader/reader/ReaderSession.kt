@@ -13,7 +13,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.Closeable
 
-internal class ReaderFailure(message: String) : Exception(message)
+internal class ReaderFailure(message: String, val reason: String = "reader_failure") : Exception(message)
 
 internal interface PageFrame : Closeable {
     val signature: String
@@ -28,7 +28,7 @@ internal interface ReaderAudio {
     suspend fun play(audio: Closeable, started: () -> Unit, progress: (Int) -> Unit)
 }
 
-internal enum class ReaderStage { CAPTURE, OCR, SYNTHESIS, PLAYBACK, RESTORE }
+internal enum class ReaderStage { CAPTURE, OCR, SYNTHESIS, PLAYBACK, NEXT, RESTORE }
 internal data class ReaderState(
     val displayed: Int? = null,
     val ocr: Int? = null,
@@ -100,7 +100,7 @@ internal class ReaderSession(
                     }
                     prefetchStarted.complete(pageTask)
                 }, progress = { ms -> update(state.copy(milliseconds = ms)) })
-                update(state.copy(playing = null, confirmed = unit.end))
+                update(state.copy(playing = null, confirmed = unit.end, stage = ReaderStage.NEXT))
                 unfinished = null
                 prefetchStarted.complete(pageTask)
                 prepared = null
@@ -134,6 +134,7 @@ internal class ReaderSession(
             }
         } else {
             val displayed = requireNotNull(cursor)
+            update(state.copy(stage = ReaderStage.CAPTURE))
             checkedCapture(displayed).use { frame ->
                 if (decoded < 0) decode(frame, displayed.index)
             }
@@ -197,6 +198,7 @@ internal class ReaderSession(
             move(forward = true, target = displayed.index + 1).close()
             displayed = requireNotNull(cursor)
         }
+        if (state.playing == null) update(state.copy(stage = ReaderStage.CAPTURE))
         val frame = if (displayed.index == target) checkedCapture(displayed) else {
             check(displayed.index == decoded)
             move(forward = true, target = target)
@@ -213,7 +215,7 @@ internal class ReaderSession(
         sentences.add(index, page)
         decoded = index
         if (page.kind == PageKind.BLANK && blankPage == null) blankPage = index
-        update(state.copy(ocr = index))
+        update(state.copy(ocr = index, stage = if (state.playing == null) ReaderStage.NEXT else ReaderStage.PLAYBACK))
     }
 
     private fun register(page: KnownPage) {

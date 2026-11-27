@@ -79,13 +79,19 @@ internal class ReaderPreferences(context: Context) {
     }
 }
 
+internal enum class TtsStage(val label: String) {
+    CONNECT("Googleの音声エンジンに接続中"), SYNTHESIZE("音声を合成中"), PREPARE_PLAYBACK("音声を再生準備中"),
+}
+
 internal class DeviceSpeech(private val context: Context, private val engine: String = GOOGLE_TTS) :
     Closeable {
     private var tts: TextToSpeech? = null
     private val completed = ConcurrentHashMap<String, CompletableDeferred<Int>>()
 
-    private suspend fun initialize(): TextToSpeech {
-        tts?.let { return it }
+    private suspend fun initialize(): TextToSpeech =
+        tts ?: ReaderDiagnostics.measure("tts connect") { connect() }
+
+    private suspend fun connect(): TextToSpeech {
         val installed = context.packageManager.queryIntentServices(
             android.content.Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE).setPackage(engine), 0,
         ).any { it.serviceInfo.packageName == engine && it.serviceInfo.enabled }
@@ -93,8 +99,10 @@ internal class DeviceSpeech(private val context: Context, private val engine: St
         val ready = CompletableDeferred<Int>()
         val speech = TextToSpeech(context.applicationContext, { ready.complete(it) }, engine)
         try {
-            if (withTimeoutOrNull(8_000) { ready.await() } != TextToSpeech.SUCCESS) {
-                throw ReaderFailure("Googleの読み上げを初期化できません。")
+            val result = withTimeoutOrNull(8_000) { ready.await() }
+            ReaderDiagnostics.event("tts init callback result=${result ?: "timeout"}")
+            if (result != TextToSpeech.SUCCESS) {
+                throw ReaderFailure("Googleの読み上げを初期化できません。", "tts_init")
             }
             speech.setAudioAttributes(speechAttributes)
             speech.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
@@ -125,8 +133,18 @@ internal class DeviceSpeech(private val context: Context, private val engine: St
                 TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED !in voice.features.orEmpty()
         }.sortedWith(compareByDescending<Voice> { it.quality }.thenBy { it.name })
 
-    suspend fun synthesize(text: String, settings: SpeechSettings, fallback: () -> Unit): Closeable {
+    suspend fun synthesize(
+        text: String, settings: SpeechSettings, report: (TtsStage) -> Unit = {}, fallback: () -> Unit,
+    ): Closeable {
+        if (tts == null) report(TtsStage.CONNECT)
         val speech = initialize()
+        report(TtsStage.SYNTHESIZE)
+        return ReaderDiagnostics.measure("tts synthesize") { synthesizeWith(speech, text, settings, fallback) }
+    }
+
+    private suspend fun synthesizeWith(
+        speech: TextToSpeech, text: String, settings: SpeechSettings, fallback: () -> Unit,
+    ): Closeable {
         val eligible = available(speech)
         val requested = eligible.firstOrNull { it.name == settings.voice }
         val choices = listOfNotNull(requested) + eligible.filterNot { it == requested }
@@ -144,17 +162,23 @@ internal class DeviceSpeech(private val context: Context, private val engine: St
                 val result = CompletableDeferred<Int>()
                 completed[id] = result
                 val code = try {
-                    if (speech.synthesizeToFile(text, Bundle(), wav, id) != TextToSpeech.SUCCESS) {
-                        TextToSpeech.ERROR
-                    } else withTimeoutOrNull(30_000) { result.await() }
-                        ?: throw ReaderFailure("音声合成が時間内に完了しませんでした。")
+                    val submitted = speech.synthesizeToFile(text, Bundle(), wav, id)
+                    ReaderDiagnostics.event("tts submit result=$submitted")
+                    if (submitted != TextToSpeech.SUCCESS) submitted
+                    else withTimeoutOrNull(30_000) { result.await() }
+                        ?: throw ReaderFailure("Googleの音声合成から応答がありません。", "tts_timeout")
                 } finally {
                     completed.remove(id)
                     if (!result.isCompleted) speech.stop()
                 }
+                ReaderDiagnostics.event("tts synthesis result=$code")
                 if (code == TextToSpeech.ERROR_NOT_INSTALLED_YET) continue
+                if (code == TextToSpeech.ERROR_SERVICE) {
+                    close()
+                    throw ReaderFailure("Googleの音声エンジンとの接続が切れました。", "tts_service")
+                }
                 if (code != TextToSpeech.SUCCESS || wav.length() <= 44) {
-                    throw ReaderFailure("音声データを合成できません。Googleの音声設定を確認してください。")
+                    throw ReaderFailure("音声データを合成できません。Googleの音声設定を確認してください。", "tts_synthesis")
                 }
                 if (settings.voice != null && settings.voice != voice.name) fallback()
                 success = true
@@ -167,11 +191,10 @@ internal class DeviceSpeech(private val context: Context, private val engine: St
     }
 
     override fun close() {
-        tts?.let {
-            it.stop()
-            it.shutdown()
-        }
+        val speech = tts ?: return
         tts = null
+        ReaderDiagnostics.event("tts shutdown")
+        try { speech.stop() } finally { speech.shutdown() }
     }
 }
 
@@ -194,13 +217,28 @@ internal object AudioCache {
     }
 }
 
-internal class DeviceAudio(private val context: Context, private val speech: DeviceSpeech,
-                           private val settings: SpeechSettings, private val fallback: () -> Unit) : ReaderAudio {
-    override suspend fun synthesize(unit: ReadingUnit): Closeable =
-        if (unit.noticePage != null) figureNotice() else speech.synthesize(unit.spoken, settings, fallback)
+internal class DeviceAudio(
+    private val context: Context, private val speech: DeviceSpeech, private val settings: SpeechSettings,
+    private val reportSynthesis: (TtsStage?) -> Unit, private val reportPlayback: (Boolean) -> Unit,
+    private val fallback: () -> Unit,
+) : ReaderAudio {
+    override suspend fun synthesize(unit: ReadingUnit): Closeable = try {
+        if (unit.noticePage != null) figureNotice()
+        else speech.synthesize(unit.spoken, settings, reportSynthesis, fallback)
+    } finally {
+        reportSynthesis(null)
+    }
 
     override suspend fun play(audio: Closeable, started: () -> Unit, progress: (Int) -> Unit) {
-        playSpeech((audio as SpeechFile).file, started, progress)
+        reportPlayback(true)
+        try {
+            playSpeech((audio as SpeechFile).file, started = {
+                reportPlayback(false)
+                started()
+            }, progress = progress)
+        } finally {
+            reportPlayback(false)
+        }
     }
 
     private fun figureNotice(): Closeable {

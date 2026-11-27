@@ -22,6 +22,19 @@ class ReflowLayoutTest {
     }
 
     @Test
+    fun skipsOnlyTextThatLayoutWouldDiscardBeforeUsingItsRecognition() {
+        val body = Region(Box(200, 30, 220, 400), 1, .91f, "読める本文。")
+        val header = Region(Box(300, 30, 325, 200), 8, .86f)
+        val duplicate = Region(Box(301, 31, 324, 199), 1, .79f, "柱の重複。")
+        val weakRuby = Region(Box(224, 32, 230, 48), 10, .34f, "よ", .99f)
+        val regions = listOf(body, header, duplicate, weakRuby)
+        val selected = ReflowLayout.recognitionCandidates(regions)
+        assertEquals(setOf(body), selected)
+        val pruned = regions.map { if (it in selected) it else it.copy(text = "", certainty = 0f) }
+        assertEquals(ReflowLayout.read(regions, 520, 700, false), ReflowLayout.read(pruned, 520, 700, false))
+    }
+
+    @Test
     fun pageKindNeedsPositiveEvidenceAndKeepsHeadingAndFigureCaption() {
         assertEquals(PageKind.BLANK, ReflowLayout.read(emptyList(), 500, 700, true).kind)
         assertThrows(ReaderFailure::class.java) { ReflowLayout.read(emptyList(), 500, 700, false) }

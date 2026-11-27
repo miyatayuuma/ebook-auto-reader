@@ -6,9 +6,11 @@ import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 import kotlin.coroutines.resume
@@ -27,8 +29,10 @@ internal class WindowPages(
     private val allowGesture: (Boolean) -> Unit,
     private val screenshotSlot: suspend () -> Unit,
     private val rightward: Boolean,
-    private val ocr: OnDeviceOcr,
+    private val readPage: suspend (ScreenFrame) -> PageText,
 ) : ReaderPages {
+    private val captureExecutor = Dispatchers.Default.asExecutor()
+
     override suspend fun capture(): PageFrame {
         val target = resolve() ?: throw ReaderFailure("DMMの本文ページを表示してください。")
         val first = captureOnce(target)
@@ -65,32 +69,32 @@ internal class WindowPages(
         throw ReaderFailure("ページ送り後の表示を確認できません。")
     }
 
-    override suspend fun read(frame: PageFrame): PageText = withContext(Dispatchers.Default) {
-        val screen = frame as ScreenFrame
-        ocr.read(screen.bitmap, screen.uniformLight)
-    }
+    override suspend fun read(frame: PageFrame): PageText = readPage(frame as ScreenFrame)
 
-    private suspend fun captureOnce(target: ReaderWindow): ScreenFrame {
-        screenshotSlot()
-        checkWindow(target)
-        val bitmap = screenshot(target.id)
-        var retained = false
-        try {
-            val frame = withContext(Dispatchers.Default) { fingerprint(bitmap) }
+    private suspend fun captureOnce(target: ReaderWindow): ScreenFrame =
+        ReaderDiagnostics.measure("capture") {
+            screenshotSlot()
             checkWindow(target)
-            retained = true
-            return frame
-        } finally {
-            if (!retained) bitmap.recycle()
+            var bitmap: Bitmap? = null
+            var retained = false
+            try {
+                val captured = withTimeoutOrNull(3_000) { screenshot(target.id).also { bitmap = it } }
+                    ?: throw ReaderFailure("Androidから画面取得の応答がありません。", "capture_timeout")
+                val frame = withContext(Dispatchers.Default) { fingerprint(captured) }
+                checkWindow(target)
+                retained = true
+                frame
+            } finally {
+                if (!retained) bitmap?.recycle()
+            }
         }
-    }
 
     private fun checkWindow(expected: ReaderWindow) {
-        if (resolve() != expected) throw ReaderFailure("対象のウィンドウが変わりました。")
+        if (resolve() != expected) throw ReaderFailure("対象のウィンドウが変わりました。", "window_changed")
     }
 
     private suspend fun screenshot(id: Int): Bitmap = suspendCancellableCoroutine { continuation ->
-        service.takeScreenshotOfWindow(id, service.mainExecutor, object : AccessibilityService.TakeScreenshotCallback {
+        service.takeScreenshotOfWindow(id, captureExecutor, object : AccessibilityService.TakeScreenshotCallback {
             override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
                 result.hardwareBuffer.use { buffer ->
                     if (!continuation.isActive) return
@@ -112,6 +116,7 @@ internal class WindowPages(
             }
 
             override fun onFailure(errorCode: Int) {
+                ReaderDiagnostics.event("capture callback error=$errorCode")
                 if (!continuation.isActive) return
                 val message = when (errorCode) {
                     AccessibilityService.ERROR_TAKE_SCREENSHOT_SECURE_WINDOW ->
@@ -120,7 +125,7 @@ internal class WindowPages(
                         "画面取得の間隔が短いため停止しました。少し待ってから再開してください。"
                     else -> "画面取得に失敗しました（Android ${errorCode}）。"
                 }
-                continuation.resumeWithException(ReaderFailure(message))
+                continuation.resumeWithException(ReaderFailure(message, "capture_android_$errorCode"))
             }
         })
     }
@@ -139,21 +144,23 @@ internal class WindowPages(
             .addStroke(GestureDescription.StrokeDescription(path, 0, 260)).build()
         allowGesture(true)
         try {
-            suspendCancellableCoroutine { continuation ->
-                val sent = service.dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
-                    override fun onCompleted(gestureDescription: GestureDescription?) {
-                        if (continuation.isActive) continuation.resume(Unit)
-                    }
+            ReaderDiagnostics.measure("gesture") {
+                withTimeoutOrNull(1_500) {
+                    suspendCancellableCoroutine<Unit> { continuation ->
+                        val sent = service.dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
+                            override fun onCompleted(gestureDescription: GestureDescription?) {
+                                if (continuation.isActive) continuation.resume(Unit)
+                            }
 
-                    override fun onCancelled(gestureDescription: GestureDescription?) {
-                        if (continuation.isActive) {
-                            continuation.resumeWithException(ReaderFailure("ページ送りが中断されました。"))
-                        }
+                            override fun onCancelled(gestureDescription: GestureDescription?) {
+                                if (continuation.isActive) continuation.resumeWithException(
+                                    ReaderFailure("ページ送りが中断されました。"))
+                            }
+                        }, null)
+                        if (!sent && continuation.isActive) continuation.resumeWithException(
+                            ReaderFailure("Androidがページ送りを受け付けませんでした。"))
                     }
-                }, null)
-                if (!sent && continuation.isActive) {
-                    continuation.resumeWithException(ReaderFailure("Androidがページ送りを受け付けませんでした。"))
-                }
+                } ?: throw ReaderFailure("Androidからページ送りの応答がありません。")
             }
         } finally {
             allowGesture(false)

@@ -9,7 +9,7 @@ import android.widget.ImageView
 import android.widget.Toast
 
 class FixtureActivity : Activity() {
-    private val fixtures = listOf("join-a", "join-b", "body-medium", "chapter")
+    private val fixtures = listOf("join-a", "join-b", "body-medium", "body-dense", "chapter")
     private lateinit var image: ImageView
     private var bitmap: Bitmap? = null
     private var page = 0
@@ -17,6 +17,7 @@ class FixtureActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        page = if (intent.getBooleanExtra("dense", false)) fixtures.indexOf("body-dense") else 0
         image = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_XY }
         setContentView(image)
         display()

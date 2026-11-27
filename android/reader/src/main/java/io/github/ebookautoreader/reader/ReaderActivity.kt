@@ -63,9 +63,8 @@ class ReaderActivity : Activity() {
             else startActivity(app)
         }
         if (BuildConfig.DEBUG) {
-            button(content, "自作ページで試す") {
-                startActivity(Intent().setClassName(packageName, "${ReaderActivity::class.java.packageName}.FixtureActivity"))
-            }
+            button(content, "自作ページで試す") { openFixture(dense = false) }
+            button(content, "文字量の多い自作ページで試す") { openFixture(dense = true) }
         }
         content.addView(text("音声設定", 21))
         voices = Spinner(this).also(content::addView)
@@ -96,10 +95,15 @@ class ReaderActivity : Activity() {
         val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
             .orEmpty().split(':').any { ComponentName.unflattenFromString(it) == own }
         serviceInfo.text = if (enabled) {
-            "DMMブックスで縦書き本文を開き、画面下の「画面取得テスト」を押してください。"
+            "DMMブックスで縦書き本文を開き、画面端の ▶ を開き、「画面取得テスト」を押してください。"
         } else {
             "アクセシビリティ設定でEbook Auto Readerを有効にしてください。"
         }
+    }
+
+    private fun openFixture(dense: Boolean) {
+        startActivity(Intent().setClassName(packageName, "${ReaderActivity::class.java.packageName}.FixtureActivity")
+            .putExtra("dense", dense))
     }
 
     private fun loadVoices() {

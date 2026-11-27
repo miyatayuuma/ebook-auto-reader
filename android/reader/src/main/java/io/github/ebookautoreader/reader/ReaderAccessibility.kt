@@ -2,38 +2,40 @@ package io.github.ebookautoreader.reader
 
 import android.accessibilityservice.AccessibilityService
 import android.app.KeyguardManager
+import android.content.BroadcastReceiver
 import android.content.Context
-import android.graphics.Color
-import android.graphics.PixelFormat
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.res.Configuration
 import android.graphics.Rect
-import android.graphics.drawable.GradientDrawable
-import android.os.SystemClock
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
-import android.view.Gravity
-import android.view.MotionEvent
-import android.view.View
+import android.os.SystemClock
+import android.view.Display
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.TextView
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 internal const val DMM_BOOKS = "com.dmm.app.dmmbooks_google_play"
 
 class ReaderAccessibility : AccessibilityService() {
     private enum class Mode { IDLE, PROBE, READING, PAUSED, BUSY }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val lifetime = SupervisorJob()
+    private val scope = CoroutineScope(lifetime + Dispatchers.Main.immediate)
+    private val handler = Handler(Looper.getMainLooper())
     private val manager by lazy { getSystemService(WindowManager::class.java) }
     private val power by lazy { getSystemService(PowerManager::class.java) }
     private val lockScreen by lazy { getSystemService(KeyguardManager::class.java) }
@@ -41,176 +43,193 @@ class ReaderAccessibility : AccessibilityService() {
     private var mode = Mode.IDLE
     private var job: Job? = null
     private var session: ReaderSession? = null
+    private var sessionWindow: ReaderWindow? = null
+    private var probeWindow: ReaderWindow? = null
+    private var panelWindow: ReaderWindow? = null
     private var ocr: OnDeviceOcr? = null
     private var speech: DeviceSpeech? = null
-    private var panel: LinearLayout? = null
-    private var label: TextView? = null
-    private var primary: Button? = null
-    private var secondary: Button? = null
-    private var shield: View? = null
+    private var controls: FloatingControls? = null
     private var gestureAllowed = false
+    private var restoring = false
+    private var collapseOnPlayback = false
     private var voiceFallback = false
     private var status = "DMMの本文を表示して取得を確認"
     private var lastState: ReaderState? = null
+    private var ocrProgress: OcrProgress? = null
+    private var synthesis: TtsStage? = null
+    private var preparingPlayback = false
     private var lastScreenshot = 0L
+    private var operationId = 0
+    private var registered = false
+    private var targetMissing = false
+
+    private val refresh = Runnable { refreshWindow() }
+    private val confirmWindowLoss = Runnable { refreshWindow(confirmLoss = true) }
+    private val screenState = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            refreshWindow(confirmLoss = true)
+        }
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        if (!registered) {
+            registerReceiver(screenState, IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_USER_PRESENT)
+            }, RECEIVER_NOT_EXPORTED)
+            registered = true
+        }
         refreshWindow()
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = refreshWindow()
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // Overlay visibility and hit testing generate window events too. Resolve once on the next loop.
+        if (!handler.hasCallbacks(refresh)) handler.post(refresh)
+    }
 
     override fun onInterrupt() {
-        if (mode == Mode.READING) stop(pause = false)
+        if (mode == Mode.READING || mode == Mode.PROBE) stop(pause = false)
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        controls?.reflow()
+        if (!handler.hasCallbacks(refresh)) handler.post(refresh)
     }
 
     private fun currentWindow(): ReaderWindow? {
         if (!power.isInteractive || lockScreen.isKeyguardLocked) return null
-        val focused = windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isFocused }
-            ?: return null
-        val root = focused.root ?: return null
-        val owner = root.packageName?.toString() ?: return null
+        val displayWindows = windows.filter { it.displayId == Display.DEFAULT_DISPLAY }
+        val focused = displayWindows.firstOrNull { it.isFocused &&
+            it.type != AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY }
+        val target = focused ?: displayWindows.firstOrNull {
+            it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive
+        } ?: return null
+        if (target.type != AccessibilityWindowInfo.TYPE_APPLICATION) return null
+        val owner = target.root?.packageName?.toString()
+            ?: panelWindow?.takeIf { it.id == target.id }?.owner ?: return null
         if (owner != DMM_BOOKS && !(BuildConfig.DEBUG && owner == packageName && DebugPages.visible)) return null
-        val rect = Rect().also(focused::getBoundsInScreen)
-        if (rect.width() <= 0 || rect.height() <= 0 || focused.displayId != android.view.Display.DEFAULT_DISPLAY) {
-            return null
-        }
-        return ReaderWindow(focused.id, owner, rect)
+        val bounds = Rect().also(target::getBoundsInScreen)
+        return if (bounds.isEmpty) null else ReaderWindow(target.id, owner, bounds)
     }
 
-    private fun refreshWindow() {
-        if (currentWindow() == null) {
-            if (mode == Mode.READING) stop(pause = false)
+    private fun refreshWindow(confirmLoss: Boolean = false) {
+        val target = currentWindow()
+        val bound = probeWindow ?: sessionWindow
+        val lost = target == null || (bound != null && bound != target)
+        if (lost && controls != null && !confirmLoss) {
+            if (!targetMissing) {
+                targetMissing = true
+                handler.postDelayed(confirmWindowLoss, 160)
+                ReaderDiagnostics.event("window pending_loss mode=$mode jobActive=${job?.isActive == true}")
+            }
+            return
+        }
+        targetMissing = false
+        handler.removeCallbacks(confirmWindowLoss)
+        if (lost) {
+            if (controls != null) ReaderDiagnostics.event("window lost mode=$mode jobActive=${job?.isActive == true}")
             detachPanel()
-        } else {
-            if (panel == null) attachPanel()
-            refreshShield()
-        }
-    }
-
-    private fun attachPanel() {
-        val context = android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Light)
-        val bar = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(5), dp(10), dp(4))
-            background = GradientDrawable().apply {
-                setColor(Color.rgb(239, 247, 243))
-                cornerRadius = dp(12).toFloat()
+            if (mode == Mode.READING || mode == Mode.PROBE || mode == Mode.PAUSED) {
+                stop(pause = false, sync = false)
             }
         }
-        label = TextView(context).apply {
-            setTextColor(Color.rgb(25, 55, 47))
-            textSize = 13f
-            bar.addView(this, LinearLayout.LayoutParams(-1, -2))
-        }
-        val actions = LinearLayout(context)
-        primary = control(context, actions) {
-            when (mode) {
-                Mode.IDLE -> start()
-                Mode.READING -> stop(pause = true)
-                Mode.PAUSED -> start()
-                else -> Unit
+        if (target != null && controls != null) panelWindow = target
+        if (target != null && controls == null) {
+            val next = FloatingControls(this, manager, primaryAction = {
+                when (mode) {
+                    Mode.IDLE, Mode.PAUSED -> start()
+                    Mode.READING -> stop(pause = true)
+                    else -> Unit
+                }
+            }, endAction = { stop(pause = false) }, probeAction = ::probe, manualTouch = {
+                if (mode == Mode.READING && !gestureAllowed) stop(pause = true)
+            })
+            try {
+                next.attach()
+                controls = next
+                panelWindow = target
+                ReaderDiagnostics.event("window attached kind=${if (target.owner == DMM_BOOKS) "dmm" else "fixture"}")
+                render()
+                refreshGuard()
+            } catch (error: WindowManager.BadTokenException) {
+                ReaderDiagnostics.event("window attach refused type=${error.javaClass.simpleName}")
             }
         }
-        secondary = control(context, actions) {
-            when (mode) {
-                Mode.IDLE -> probe()
-                Mode.READING, Mode.PAUSED -> stop(pause = false)
-                else -> Unit
-            }
-        }
-        bar.addView(actions)
-        val params = overlay(-1, -2).apply { gravity = Gravity.BOTTOM; y = dp(30) }
-        manager.addView(bar, params)
-        panel = bar
-        render()
-    }
-
-    private fun control(context: Context, container: LinearLayout, action: () -> Unit) =
-        Button(context).apply {
-            isAllCaps = false
-            setOnClickListener { action() }
-            container.addView(this, LinearLayout.LayoutParams(0, dp(46), 1f))
-        }
-
-    private fun overlay(width: Int, height: Int) = WindowManager.LayoutParams(
-        width, height, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-        PixelFormat.TRANSLUCENT,
-    )
-
-    private fun refreshShield() {
-        val need = panel != null && mode in setOf(Mode.READING, Mode.BUSY, Mode.PROBE)
-        if (!need) {
-            shield?.let(manager::removeViewImmediate)
-            shield = null
-            return
-        }
-        val params = overlay(-1, -1).apply {
-            if (gestureAllowed) flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-        }
-        val current = shield
-        if (current != null) {
-            if ((current.layoutParams as WindowManager.LayoutParams).flags != params.flags) {
-                manager.updateViewLayout(current, params)
-            }
-            return
-        }
-        val guard = View(this).apply {
-            keepScreenOn = true
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            setOnTouchListener { _, event ->
-                if (event.actionMasked == MotionEvent.ACTION_DOWN && mode == Mode.READING) stop(pause = true)
-                true
-            }
-        }
-        // Keep the controls above the touch guard. The target-window screenshot excludes both overlays.
-        val controls = requireNotNull(panel)
-        val layout = controls.layoutParams
-        manager.removeViewImmediate(controls)
-        manager.addView(guard, params)
-        manager.addView(controls, layout)
-        shield = guard
     }
 
     private fun detachPanel() {
-        shield?.let(manager::removeViewImmediate)
-        panel?.let(manager::removeViewImmediate)
-        shield = null
-        panel = null
-        label = null
-        primary = null
-        secondary = null
+        controls?.detach()
+        controls = null
+        panelWindow = null
+    }
+
+    private fun refreshGuard() {
+        val reading = mode == Mode.READING && ocrProgress?.timedOut != true
+        controls?.guardTouches((reading || restoring) && !gestureAllowed, reading || restoring)
     }
 
     private fun render() {
-        label?.text = status
-        primary?.apply {
-            text = when (mode) {
-                Mode.READING -> "一時停止"
-                Mode.PAUSED -> "再開"
-                else -> "読み上げ開始"
-            }
-            isEnabled = mode in setOf(Mode.IDLE, Mode.READING, Mode.PAUSED)
-        }
-        secondary?.apply {
-            text = if (mode == Mode.IDLE || mode == Mode.PROBE) "画面取得テスト" else "終了"
-            isEnabled = mode in setOf(Mode.IDLE, Mode.READING, Mode.PAUSED)
-        }
+        controls?.render(status, playing = mode == Mode.READING, action = when (mode) {
+            Mode.READING -> "一時停止"
+            Mode.PAUSED -> "再開"
+            else -> "読み上げ開始"
+        }, canAct = mode == Mode.IDLE || mode == Mode.PAUSED || mode == Mode.READING,
+            canEnd = mode == Mode.READING || mode == Mode.PAUSED || mode == Mode.PROBE,
+            canProbe = mode == Mode.IDLE || mode == Mode.PAUSED)
     }
 
-    private fun change(next: Mode, message: String) {
+    private fun change(next: Mode, message: String, expand: Boolean = false) {
+        if (mode != next) ReaderDiagnostics.event("mode from=$mode to=$next jobActive=${job?.isActive == true}")
         mode = next
         status = message
         render()
-        refreshShield()
+        if (expand) controls?.expand(true)
+        refreshGuard()
     }
 
-    private fun pagePort(engine: OnDeviceOcr) = WindowPages(this, ::currentWindow, { allowed ->
-        gestureAllowed = allowed
-        refreshShield()
-    }, ::awaitScreenshotSlot, if (DebugPages.visible) true else preferences.rightward(), engine)
+    private fun operate(name: String, action: suspend () -> Unit) {
+        val id = ++operationId
+        val next = scope.launch(start = CoroutineStart.LAZY) {
+            ReaderDiagnostics.event("job id=$id op=$name start")
+            try {
+                action()
+            } catch (error: CancellationException) {
+                if (currentCoroutineContext().isActive) operationFailed(name, error)
+                throw error
+            } catch (error: Exception) {
+                operationFailed(name, error)
+            }
+        }
+        next.invokeOnCompletion { error ->
+            ReaderDiagnostics.event("job id=$id op=$name end result=${error?.javaClass?.simpleName ?: "ok"}")
+        }
+        job = next
+        next.start()
+    }
+
+    private fun operationFailed(name: String, error: Exception) {
+        logFailure(name, error)
+        clearSession()
+        change(Mode.IDLE, userMessage(error), expand = true)
+    }
+
+    private fun pagePort(target: ReaderWindow, engine: OnDeviceOcr? = null) = WindowPages(
+        this, { currentWindow()?.takeIf { it == target } }, { allowed ->
+            gestureAllowed = allowed
+            refreshGuard()
+        }, ::awaitScreenshotSlot, if (target.owner == DMM_BOOKS) preferences.rightward() else true,
+    ) { frame ->
+        requireNotNull(engine).read(frame.bitmap, frame.uniformLight) {
+            ocrProgress = it
+            updateReadingStatus()
+            if (it?.timedOut == true && mode == Mode.READING) {
+                controls?.expand(true)
+                refreshGuard()
+            }
+        }
+    }
 
     private suspend fun awaitScreenshotSlot() {
         val remaining = 420 - (SystemClock.elapsedRealtime() - lastScreenshot)
@@ -219,109 +238,188 @@ class ReaderAccessibility : AccessibilityService() {
     }
 
     private fun probe() {
+        if (mode != Mode.IDLE && mode != Mode.PAUSED) return
+        val target = currentWindow() ?: return change(mode, "DMMの本文ウィンドウを確認できません。", expand = true)
+        val returnMode = mode
+        probeWindow = target
         change(Mode.PROBE, "画面取得を確認中…")
-        job = scope.launch {
-            val engine = OnDeviceOcr(filesDir.resolve("ndl"))
+        operate("probe") {
             val outcome = try {
-                pagePort(engine).capture().use { "画面取得に成功。本文を表示したまま読み上げを開始できます。" }
+                pagePort(target).capture().use { "画面取得に成功しました。" }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                message(error)
+                logFailure("probe", error)
+                userMessage(error)
             } finally {
-                engine.close()
+                probeWindow = null
             }
-            change(Mode.IDLE, outcome)
+            change(returnMode, outcome, expand = true)
         }
     }
 
     private fun start() {
+        if (mode != Mode.IDLE && mode != Mode.PAUSED) return
+        val target = currentWindow() ?: return change(mode, "DMMの本文ウィンドウを確認できません。", expand = true)
+        if (sessionWindow != null && sessionWindow != target) {
+            clearSession()
+            return change(Mode.IDLE, "対象の表示が変わりました。読み上げを開始し直してください。", expand = true)
+        }
+        sessionWindow = target
+        collapseOnPlayback = true
         change(Mode.READING, "準備中…")
-        job = scope.launch {
+        operate("read") {
             try {
-                val current = session ?: createSession().also { session = it }
+                val current = session ?: createSession(target).also { session = it }
                 current.run()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                val reason = message(error)
-                change(Mode.BUSY, reason)
-                val restored = session?.restore() ?: true
+                logFailure("read", error)
+                val reason = userMessage(error)
+                change(Mode.BUSY, reason, expand = true)
+                val restored = restore()
                 clearSession()
-                change(Mode.IDLE, reason + if (restored) "" else " 表示ページを手動で確認してください。")
+                change(Mode.IDLE, reason + if (restored) "" else " 表示ページを手動で確認してください。", expand = true)
             }
         }
     }
 
-    private fun createSession(): ReaderSession {
+    private fun createSession(target: ReaderWindow): ReaderSession {
         val pronunciations = preferences.pronunciations(filesDir)
         val createdOcr = OnDeviceOcr(filesDir.resolve("ndl")).also { ocr = it }
         val createdSpeech = DeviceSpeech(this).also { speech = it }
-        val audio = DeviceAudio(this, createdSpeech, preferences.speech()) {
+        val audio = DeviceAudio(this, createdSpeech, preferences.speech(), reportSynthesis = {
+            synthesis = it
+            updateReadingStatus()
+        }, reportPlayback = {
+            preparingPlayback = it
+            updateReadingStatus()
+        }) {
             voiceFallback = true
-            lastState?.let(::onState)
+            updateReadingStatus()
         }
-        return ReaderSession(pagePort(createdOcr), audio, pronunciations, ::onState)
+        return ReaderSession(pagePort(target, createdOcr), audio, pronunciations, ::onState)
     }
 
     private fun onState(state: ReaderState) {
+        val previous = lastState
         lastState = state
-        if (mode != Mode.READING) return
-        val page = state.playing?.page?.plus(1)
-        val stage = if (page != null) {
-            val position = state.milliseconds / 1000
-            if ((state.displayed ?: 0) > (state.ocr ?: 0)) "読み上げ中 · 次ページを認識中"
-            else "読み上げ中 · セッション内 ${page} ページ · ${position} 秒"
-        } else when (state.stage) {
-            ReaderStage.CAPTURE -> "画面取得中"
-            ReaderStage.OCR -> "本文を認識中"
-            ReaderStage.SYNTHESIS -> "音声を合成中"
-            ReaderStage.PLAYBACK -> "次の文を準備中"
-            ReaderStage.RESTORE -> "表示ページを復元中"
+        if (previous?.stage != state.stage || previous.displayed != state.displayed || previous.ocr != state.ocr) {
+            ReaderDiagnostics.event("session stage=${state.stage} displayed=${state.displayed}" +
+                " ocrPage=${state.ocr} jobActive=${job?.isActive == true}")
         }
-        val next = stage + if (voiceFallback) " · 代替のオフライン音声" else ""
+        if (mode == Mode.READING && state.playing != null && collapseOnPlayback) {
+            collapseOnPlayback = false
+            controls?.expand(false)
+        }
+        updateReadingStatus()
+    }
+
+    private fun updateReadingStatus() {
+        if (mode != Mode.READING) return
+        val state = lastState
+        val progress = ocrProgress
+        val playing = state?.playing?.page?.plus(1)
+        val detail = when {
+            synthesis != null -> synthesis?.label
+            preparingPlayback -> TtsStage.PREPARE_PLAYBACK.label
+            else -> null
+        }
+        val text = when {
+            progress?.timedOut == true -> progress.label
+            playing != null -> "読み上げ中 · ${playing}ページ · ${state.milliseconds / 1000}秒" +
+                (progress?.let { "\n次ページ · ${it.label}" } ?: "")
+            progress != null -> progress.label + (detail?.let { "\n$it" } ?: "")
+            detail != null -> detail
+            state?.stage == ReaderStage.CAPTURE -> "画面取得中"
+            state?.stage == ReaderStage.RESTORE -> "表示ページを復元中"
+            else -> "次の文を準備中"
+        }
+        val next = text + if (voiceFallback) "\n代替のオフライン音声" else ""
         if (next != status) {
             status = next
-            label?.text = status
+            render()
         }
     }
 
-    private fun stop(pause: Boolean) {
-        change(Mode.BUSY, "再生を停止して表示を確認中…")
-        val running = job
-        job = scope.launch {
-            running?.cancelAndJoin()
-            val synchronized = session?.restore() ?: true
+    private suspend fun restore(): Boolean {
+        val current = session ?: return true
+        val target = sessionWindow ?: return false
+        if (currentWindow() != target) return false
+        restoring = true
+        refreshGuard()
+        return try {
+            ReaderDiagnostics.measure("restore") { current.restore() }.also {
+                ReaderDiagnostics.event("restore synchronized=$it")
+            }
+        } finally {
+            restoring = false
+            refreshGuard()
+        }
+    }
+
+    private fun stop(pause: Boolean, sync: Boolean = true) {
+        if (mode == Mode.IDLE || mode == Mode.BUSY) return
+        val previous = job
+        val wasProbe = mode == Mode.PROBE
+        change(Mode.BUSY, "処理を停止中…", expand = true)
+        previous?.cancel()
+        operate(if (pause) "pause" else "stop") {
+            if (previous != null && withTimeoutOrNull(3_000) { previous.join() } == null) {
+                change(Mode.BUSY, "OCRなどの処理が終了するのを待っています。", expand = true)
+                previous.join()
+            }
+            val synchronized = sync && (wasProbe && session == null || restore())
             if (pause && synchronized && session != null) {
-                change(Mode.PAUSED, "一時停止 · 文頭から再開")
+                change(Mode.PAUSED, "一時停止 · 文頭から再開", expand = true)
             } else {
                 clearSession()
-                change(Mode.IDLE, if (synchronized) "終了 · 読み上げ位置に表示を同期"
-                else "停止 · 表示を確認できません。本文ページを開き直してください。")
+                change(Mode.IDLE, when {
+                    !sync -> "対象ウィンドウが変わったため停止しました。"
+                    wasProbe && synchronized -> "画面取得を終了しました。"
+                    synchronized -> "終了 · 読み上げ位置に表示を同期"
+                    else -> "停止 · 表示ページを手動で確認してください。"
+                }, expand = true)
             }
         }
     }
 
     private fun clearSession() {
         session = null
-        ocr?.close()
+        sessionWindow = null
+        val closedOcr = ocr
+        val closedSpeech = speech
         ocr = null
-        speech?.close()
         speech = null
+        for (resource in listOfNotNull(closedOcr, closedSpeech)) {
+            try {
+                resource.close()
+            } catch (error: Exception) {
+                ReaderDiagnostics.event("close resource=${resource.javaClass.simpleName} result=${error.javaClass.simpleName}")
+            }
+        }
         voiceFallback = false
         lastState = null
+        ocrProgress = null
+        synthesis = null
+        preparingPlayback = false
     }
 
-    private fun message(error: Exception) =
+    private fun logFailure(operation: String, error: Exception) {
+        val reason = (error as? ReaderFailure)?.reason ?: error.javaClass.simpleName
+        ReaderDiagnostics.event("failure op=$operation reason=$reason stage=${lastState?.stage}")
+    }
+
+    private fun userMessage(error: Exception) =
         (error as? ReaderFailure)?.message ?: "読み上げを継続できません。表示と音声設定を確認してください。"
 
-    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
-
     override fun onDestroy() {
-        scope.cancel()
-        val running = job
-        if (running == null) clearSession() else running.invokeOnCompletion { clearSession() }
+        handler.removeCallbacksAndMessages(null)
+        if (registered) unregisterReceiver(screenState)
         detachPanel()
+        lifetime.invokeOnCompletion { mainExecutor.execute { clearSession() } }
+        lifetime.cancel()
         super.onDestroy()
     }
 }

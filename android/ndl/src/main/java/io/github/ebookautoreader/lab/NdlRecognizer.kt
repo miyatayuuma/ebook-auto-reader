@@ -13,6 +13,7 @@ import org.json.JSONArray
 import java.io.File
 import java.nio.FloatBuffer
 import java.nio.LongBuffer
+import java.util.concurrent.CancellationException
 import kotlin.math.exp
 import kotlin.math.max
 
@@ -24,7 +25,41 @@ import kotlin.math.max
 data class NdlRegion(val bounds: Rect, val category: Int, val detection: Float,
     val text: String = "", val certainty: Float = 0f, val complete: Boolean = true)
 
-class NdlRecognizer(directory: File) : AutoCloseable {
+enum class NdlStage { DETECT, RECOGNIZE }
+
+data class NdlProgress(
+    val stage: NdlStage, val detected: Int = 0, val total: Int = 0, val done: Int = 0, val skipped: Int = 0,
+)
+
+class NdlCancellation {
+    @Volatile private var cancelled = false
+    private var activeRun: OrtSession.RunOptions? = null
+
+    @Synchronized
+    fun cancel() {
+        cancelled = true
+        activeRun?.setTerminate(true)
+    }
+
+    internal fun check() {
+        if (cancelled) throw CancellationException("NDL reading cancelled")
+    }
+
+    internal fun <T> run(block: (OrtSession.RunOptions) -> T): T = OrtSession.RunOptions().use { options ->
+        synchronized(this) {
+            check()
+            activeRun = options
+        }
+        try {
+            block(options)
+        } finally {
+            // Release our reference before closing the native handle, including on inference failure.
+            synchronized(this) { activeRun = null }
+        }
+    }
+}
+
+class NdlRecognizer(directory: File, private val threads: Int = 1) : AutoCloseable {
     private val env = OrtEnvironment.getEnvironment()
     private val charset = JSONArray(directory.resolve("charset.json").readText()).let { chars ->
         List(chars.length()) { chars.getString(it) }
@@ -32,7 +67,7 @@ class NdlRecognizer(directory: File) : AutoCloseable {
     private val detector = open(directory.resolve("deim.onnx"))
     private val recognizer = try {
         open(directory.resolve("parseq.onnx"))
-    } catch (error: Exception) {
+    } catch (error: Throwable) {
         detector.close()
         throw error
     }
@@ -41,7 +76,7 @@ class NdlRecognizer(directory: File) : AutoCloseable {
     private data class Recognition(val text: String, val certainty: Float, val complete: Boolean)
 
     private fun open(model: File): OrtSession = OrtSession.SessionOptions().use { options ->
-        options.setIntraOpNumThreads(1)
+        options.setIntraOpNumThreads(threads)
         options.setInterOpNumThreads(1)
         env.createSession(model.absolutePath, options)
     }
@@ -91,7 +126,7 @@ class NdlRecognizer(directory: File) : AutoCloseable {
         return list.toFloatArray()
     }
 
-    private fun detect(bitmap: Bitmap, categoriesWanted: Set<Int>): List<Detection> {
+    private fun detect(bitmap: Bitmap, categoriesWanted: Set<Int>, cancellation: NdlCancellation): List<Detection> {
         val dimensions = detector.inputNames.associateWith { shape(detector, it) }
         val imageName = dimensions.entries.single { it.value.size == 4 }.key
         val sizeName = dimensions.entries.single { it.value.size == 2 }.key
@@ -107,7 +142,10 @@ class NdlRecognizer(directory: File) : AutoCloseable {
         return input.use {
             OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(dims[2], dims[3])),
                 sizeDims).use { imageSize ->
-                detector.run(mapOf(imageName to input, sizeName to imageSize)).use { output ->
+                cancellation.run { options ->
+                    detector.run(mapOf(imageName to input, sizeName to imageSize), options)
+                }.use { output ->
+                    cancellation.check()
                     val categories = floats(output[0].value)
                     val boxes = floats(output[1].value)
                     val confidence = floats(output[2].value)
@@ -144,7 +182,8 @@ class NdlRecognizer(directory: File) : AutoCloseable {
         return kept
     }
 
-    private fun recognize(bitmap: Bitmap, box: Rect, measureCertainty: Boolean, tightRotation: Boolean): Recognition {
+    private fun recognize(bitmap: Bitmap, box: Rect, measureCertainty: Boolean, tightRotation: Boolean,
+                          cancellation: NdlCancellation): Recognition {
         val name = recognizer.inputNames.single()
         val dims = ndlImageShape(shape(recognizer, name))
         val crop = Bitmap.createBitmap(bitmap, box.left, box.top, box.width(), box.height())
@@ -159,7 +198,8 @@ class NdlRecognizer(directory: File) : AutoCloseable {
             if (crop !== bitmap) crop.recycle()
         }
         return input.use {
-            recognizer.run(mapOf(name to input)).use { output ->
+            cancellation.run { options -> recognizer.run(mapOf(name to input), options) }.use { output ->
+                cancellation.check()
                 val batch = output[0].value as? Array<*>
                 val steps = batch?.singleOrNull() as? Array<*>
                     ?: error("Expected PARSeq logits shaped [1, steps, classes]")
@@ -185,16 +225,35 @@ class NdlRecognizer(directory: File) : AutoCloseable {
         }
     }
 
-    fun read(bitmap: Bitmap, textCategories: Set<Int>, extraCategories: Set<Int> = emptySet(),
-             productLayout: Boolean = false): List<NdlRegion> =
-        detect(bitmap, textCategories + extraCategories).map { detection ->
-            val recognition = if (detection.category in textCategories) {
-                recognize(bitmap, detection.rect, measureCertainty = detection.category == 10,
-                    tightRotation = productLayout)
-            } else null
-            NdlRegion(detection.rect, detection.category, detection.confidence, recognition?.text.orEmpty(),
-                recognition?.certainty ?: 0f, recognition?.complete ?: true)
+    fun read(
+        bitmap: Bitmap,
+        textCategories: Set<Int>,
+        extraCategories: Set<Int> = emptySet(),
+        productLayout: Boolean = false,
+        cancellation: NdlCancellation = NdlCancellation(),
+        selectText: (List<NdlRegion>) -> Set<NdlRegion> = { it.toSet() },
+        progress: (NdlProgress) -> Unit = {},
+    ): List<NdlRegion> {
+        cancellation.check()
+        progress(NdlProgress(NdlStage.DETECT))
+        val regions = detect(bitmap, textCategories + extraCategories, cancellation).map {
+            NdlRegion(it.rect, it.category, it.confidence)
         }
+        cancellation.check()
+        val candidates = selectText(regions).filterTo(HashSet()) { it.category in textCategories }
+        val skipped = regions.count { it.category in textCategories } - candidates.size
+        var done = 0
+        val planned = NdlProgress(NdlStage.RECOGNIZE, regions.size, candidates.size, skipped = skipped)
+        progress(planned)
+        return regions.map { region ->
+            cancellation.check()
+            if (region !in candidates) return@map region
+            val result = recognize(bitmap, region.bounds, measureCertainty = region.category == 10,
+                tightRotation = productLayout, cancellation)
+            progress(planned.copy(done = ++done))
+            region.copy(text = result.text, certainty = result.certainty, complete = result.complete)
+        }
+    }
 
     override fun close() {
         recognizer.close()
