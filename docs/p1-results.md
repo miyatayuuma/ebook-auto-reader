@@ -1,12 +1,12 @@
 # P1 技術選定
 
-## P2に残す比較候補
+## P2の採用判断
 
 | 対象 | 第一候補 | 比較・判断 |
 | --- | --- | --- |
-| OCR | NDLOCR-Lite 2.0.0（CPU） | ML Kit日本語16.0.1と同じ画像・同じ実機で比較。重大な本文誤り、本文順、ルビ、負荷の順で選ぶ |
+| OCR | NDLOCR-Lite 2.0.0（CPU） | P2の標準実装候補。ML Kitとの実機での優劣判定は詳細値の入手まで保留 |
 | 読み | 本文と分離したルビ・限定辞書 | Sudachiの読みを候補として比較する。形態素解析の一律置換は避け、正解が確認できる場合を優先する |
-| TTS | Google TTSの日本語オフライン音声 | 原文と補正入力の同一音声比較を優先。Open JTalkはPCの読み・音声の独立した対照。Googleの精度・自然さが不足する場合はVOICEVOX COREの公式arm64 Androidビルドを比較対象とする |
+| TTS | Google TTSの日本語オフライン音声 | 正式採用。端末で利用可能な日本語オフライン音声を選べるようにする |
 
 - NDLOCR-Lite 2.0.0は2026年11月24日公開。PC CLIを固定した。Android試作はONNXの検出、認識、簡易読順、ルビ候補の親行対応までを試す。上流の完全なレイアウトと読順を移植していない。上流のコードはCC BY 4.0、レイアウトモデルはDINOv3条件も確認する。GoogleのML Kitは日本語モデルをアプリへ同梱でき、比較試作では公式の依存関係だけを指定する。 [NDLラボ](https://lab.ndl.go.jp/news/2026/2026-11-24/) ／ [NDLOCR-Lite 2.0.0](https://pypi.org/project/ndlocr-lite/2.0.0/) ／ [Google ML Kit](https://developers.google.com/ml-kit/vision/text-recognition/v2/android)
 - Nanamiは公式クラウド候補。AzureのニューラルTTS無料枠は月50万文字。仮に300字/分なら月約28時間に相当し、利用量と無料枠の確認が必要になる。端末単体・書籍本文を外部へ自動送信しない方針から、P2の読み上げ候補はオフラインを優先する。 [Microsoftの対応音声](https://learn.microsoft.com/azure/ai-services/speech-service/language-support?tabs=tts) ／ [Azure Speech料金](https://azure.microsoft.com/ja-jp/pricing/details/speech/)
@@ -56,4 +56,9 @@ Open JTalk標準は「一行だけ」「市場で仕入れ」「舞台の上手�
 - APKのインストール、ML Kitの実行、Google TTSの実行、管理PCでのNDLOCR-Liteモデル取得に成功。
 - 初回のADB転送後は端末のモデルディレクトリが空だった。本人が `adb shell -T run-as` へ切り替えて転送に成功。正式スクリプトでは端末側のファイルの存在、サイズ、SHA-256を確認してから試験を開始する。
 - 転送修正後、NDLは形状 `[-1, 3, 800, 800]` でテンソル生成に失敗した。検出の画像・対象サイズ入力と認識の画像入力でバッチ軸だけを1に具体化し、チャンネル・空間軸などが未確定なら明示的に失敗するよう修正した。
-- 修正版APKでのNDLの推論完走、ML Kitとの認識精度・速度比較、採用判断用の音声試聴は実機再試験で確認する。
+
+### 修正版APKの再試験（2026-11-27、本人確認）
+
+Pixel 9／Android 17／API 37 で ML Kit、NDLOCR-Lite、Google TTS の3項目が成功。NDLは修正版で推論が完走し、Google TTSは本人の試聴で良好だった。声を選択できる構成をP2に採用する。
+
+実機OCRの詳細採点、推論時間、メモリの値は未共有。PCの記録を実機値として扱わず、OCR間の優劣判定は保留する。DMM実画面の取得・遷移はP2で実機確認する。
