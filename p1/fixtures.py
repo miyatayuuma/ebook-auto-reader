@@ -99,7 +99,7 @@ def render(root, font_path, font_index, dense=False):
         page("body-bottom", "body", 41, BOTTOM, folio="27", start_y=155)
         page("short-a", "body", 42, ["鳥が鳴いた。"])
         page("short-b", "body", 42, ["風がやんだ。"])
-        page("short-c", "body", 42, ["雲が流れた。"])
+        page("short-c", "body", 42, ["雲が流れた。"], start_y=270)
         page("body-narrow", "body", 23, BODY[:7], column_pitch=38, start_y=470, start_x=745)
     page("chapter", "chapter", 66, ["第二章　橋の向こう"], folio="13")
     page("figure", "figure", 34, graph=True)
