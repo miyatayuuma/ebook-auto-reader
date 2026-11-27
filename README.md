@@ -12,3 +12,5 @@ DMMブックスで購入済みの日本語書籍を、Androidで自然に耳か�
 
 - [P1 比較ラボの実行方法](p1/README.md)
 - [P1 選定と測定結果](docs/p1-results.md)
+
+P2のデバッグAPKとPixelへの導入は [中核読書エンジンの実機手順](p2/README.md) を参照してください。

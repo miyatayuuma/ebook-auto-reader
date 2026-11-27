@@ -1,6 +1,6 @@
 plugins {
-    id("com.android.application") version "8.9.2"
-    id("org.jetbrains.kotlin.android") version "2.1.21"
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
 }
 
 android {
@@ -42,5 +42,5 @@ tasks.named("preBuild") { dependsOn(stageFixtures) }
 dependencies {
     testImplementation("junit:junit:4.13.2")
     implementation("com.google.mlkit:text-recognition-japanese:16.0.1")
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.23.2")
+    implementation(project(":ndl"))
 }

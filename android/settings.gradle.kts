@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "EbookReaderLab"
-include(":app")
+include(":app", ":ndl", ":reader")
