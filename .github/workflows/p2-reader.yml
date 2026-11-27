@@ -43,6 +43,8 @@ jobs:
           grep -Fx 'assets/pages/join-a.png' apk-files.txt
           grep -Fx 'assets/pages/body-dense.png' apk-files.txt
           grep -Fx 'assets/pages/body-bottom.png' apk-files.txt
+          grep -Fx 'assets/pages/short-a.png' apk-files.txt
+          grep -Fx 'assets/pages/body-narrow.png' apk-files.txt
       - uses: actions/upload-artifact@v4
         with:
           name: p2-debug

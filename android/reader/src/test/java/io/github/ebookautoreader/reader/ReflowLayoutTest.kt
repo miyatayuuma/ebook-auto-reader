@@ -59,7 +59,9 @@ class ReflowLayoutTest {
         val image = Region(Box(50, 70, 400, 500), 6, .90f)
         val caption = Region(Box(70, 540, 190, 560), 2, .9f, "図の説明。")
         val figure = ReflowLayout.read(listOf(image, caption), 500, 700, false)
-        assertEquals(PageText(listOf(SourceLine("図の説明。")), PageKind.FIGURE), figure)
+        assertEquals(PageKind.FIGURE, figure.kind)
+        assertEquals("図の説明。", figure.lines.single().original)
+        assertNotNull(figure.lines.single().bounds)
         val damaged = Region(Box(390, 60, 430, 260), 1, .9f, "", complete = false)
         assertThrows(ReaderFailure::class.java) { ReflowLayout.read(listOf(image, damaged), 500, 700, false) }
         val heading = Region(Box(280, 80, 320, 280), 16, .85f, "第二章")

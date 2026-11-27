@@ -100,7 +100,9 @@ internal object ReflowLayout {
         }
         val ordered = order(substantive) + order(captions)
         reportBottomLines(ordered.count { it.box.bottom >= height * 0.87 })
-        return PageText(ordered.map { SourceLine(it.text, ruby[it].orEmpty()) }, kind)
+        return PageText(ordered.map { SourceLine(it.text, ruby[it].orEmpty(), it.box.let { box ->
+            LineBounds(box.left, box.top, box.right, box.bottom)
+        }) }, kind)
     }
 
     private fun hasJapanese(text: String) = text.any { it in 'ぁ'..'ヿ' || it in '㐀'..'鿿' }

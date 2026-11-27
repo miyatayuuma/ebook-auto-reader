@@ -60,7 +60,7 @@ def render(root, font_path, font_index, dense=False):
     references = {}
 
     def page(key, kind, size, columns=(), graph=False, folio=None, ruby=False, column_pitch=None,
-             start_y=200):
+             start_y=200, start_x=950):
         image = Image.new("RGB", (1080, 2424), "#fffdf8")
         draw = ImageDraw.Draw(image)
         regions = []
@@ -74,7 +74,7 @@ def render(root, font_path, font_index, dense=False):
 
         step = column_pitch or int(size * 1.9)
         for index, column in enumerate(columns):
-            x = 950 - index * step
+            x = start_x - index * step
             role = "heading" if kind == "chapter" else "body"
             label(x, start_y, column, size, role, True)
             if ruby and index == 1:
@@ -97,6 +97,10 @@ def render(root, font_path, font_index, dense=False):
     if dense:
         page("body-dense", "body", 32, DENSE, folio="14", ruby=True, column_pitch=49)
         page("body-bottom", "body", 41, BOTTOM, folio="27", start_y=155)
+        page("short-a", "body", 42, ["鳥が鳴いた。"])
+        page("short-b", "body", 42, ["風がやんだ。"])
+        page("short-c", "body", 42, ["雲が流れた。"])
+        page("body-narrow", "body", 23, BODY[:7], column_pitch=38, start_y=470, start_x=745)
     page("chapter", "chapter", 66, ["第二章　橋の向こう"], folio="13")
     page("figure", "figure", 34, graph=True)
     page("blank", "blank", 34)

@@ -10,8 +10,8 @@ android {
         applicationId = "io.github.ebookautoreader"
         minSdk = 34
         targetSdk = 35
-        versionCode = 3
-        versionName = "p2.2"
+        versionCode = 4
+        versionName = "p2.3"
         ndk { abiFilters += "arm64-v8a" }
     }
     buildTypes {
@@ -28,7 +28,8 @@ android {
 
 val stageFixtures by tasks.registering(Sync::class) {
     from(rootProject.layout.projectDirectory.dir("../p1/out/fixtures")) {
-        include("pages/join-*.png", "pages/body-medium.png", "pages/body-dense.png", "pages/body-bottom.png", "pages/chapter.png")
+        include("pages/join-*.png", "pages/short-*.png", "pages/body-medium.png", "pages/body-dense.png",
+            "pages/body-bottom.png", "pages/body-narrow.png", "pages/chapter.png")
     }
     into(layout.buildDirectory.dir("fixture-assets"))
 }

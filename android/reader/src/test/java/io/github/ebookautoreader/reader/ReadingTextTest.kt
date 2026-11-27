@@ -5,6 +5,20 @@ import org.junit.Test
 
 class ReadingTextTest {
     @Test
+    fun crossPageSentenceRetainsOriginalLineBoundsAndOffsets() {
+        val first = LineBounds(101, 123, 145, 700)
+        val second = LineBounds(52, 47, 91, 300)
+        val buffer = SentenceBuffer(Pronunciations())
+        buffer.add(0, PageText(listOf(SourceLine("朝です。水は", bounds = first)), PageKind.BODY))
+        assertEquals(listOf(SourceRange(0, 0, 0, 4, first)), buffer.poll()?.ranges)
+        buffer.add(1, PageText(listOf(SourceLine("冷たい。", bounds = second)), PageKind.BODY))
+        val joined = requireNotNull(buffer.poll())
+        assertEquals("水は冷たい。", joined.original)
+        assertEquals(listOf(SourceRange(0, 0, 4, 6, first), SourceRange(1, 0, 0, 4, second)), joined.ranges)
+        assertEquals(joined.ranges, joined.speechMap.map { it.source })
+    }
+
+    @Test
     fun prioritizesRubyAndAppliesOnlyUnambiguousPronunciations() {
         val text = "空音は上手に、舞台の上手へ。"
         val readings = Pronunciations(

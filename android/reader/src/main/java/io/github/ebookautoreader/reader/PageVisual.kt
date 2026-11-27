@@ -4,18 +4,29 @@ import kotlin.math.abs
 
 internal enum class PageComparison { SAME, DIFFERENT, UNCERTAIN }
 
+internal data class SignatureDifference(val changedCells: Int, val cells: Int, val meanLumaDelta: Double) {
+    val comparison: PageComparison get() = when {
+        cells == 0 -> PageComparison.UNCERTAIN
+        changedCells >= maxOf(12, cells / 500) -> PageComparison.DIFFERENT
+        changedCells <= 3 -> PageComparison.SAME
+        else -> PageComparison.UNCERTAIN
+    }
+}
+
 internal class PageSignature(private val cells: ByteArray) {
-    fun compare(other: PageSignature): PageComparison {
-        if (cells.size != other.cells.size) return PageComparison.UNCERTAIN
+    fun difference(other: PageSignature): SignatureDifference {
+        if (cells.size != other.cells.size || cells.isEmpty()) return SignatureDifference(0, 0, 0.0)
         var changed = 0
-        val distinct = maxOf(12, cells.size / 500)
+        var total = 0
         for (index in cells.indices) {
             val distance = abs((cells[index].toInt() and 255) - (other.cells[index].toInt() and 255))
-            if (distance >= 12 && ++changed >= distinct) return PageComparison.DIFFERENT
+            total += distance
+            if (distance >= 12) changed++
         }
-        return if (changed <= 3) PageComparison.SAME else PageComparison.UNCERTAIN
+        return SignatureDifference(changed, cells.size, total.toDouble() / cells.size)
     }
 
+    fun compare(other: PageSignature) = difference(other).comparison
     fun matches(other: PageSignature) = compare(other) == PageComparison.SAME
 }
 
@@ -26,8 +37,7 @@ internal class PageTransition(private val origin: PageSignature) {
     private var originCount = 0
 
     // A frame that moved and then returned is not evidence that the swipe had no effect.
-    fun observe(frame: PageSignature): PageComparison {
-        val relation = origin.compare(frame)
+    fun observe(frame: PageSignature, relation: PageComparison = origin.compare(frame)): PageComparison {
         if (relation == PageComparison.SAME && !leftOrigin) {
             originCount++
             if (originCount >= 4) return PageComparison.SAME

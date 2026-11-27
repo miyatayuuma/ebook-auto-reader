@@ -25,6 +25,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 class ReaderActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -58,11 +59,7 @@ class ReaderActivity : Activity() {
         content.addView(text("Ebook Auto Reader", 26))
         serviceInfo = text("", 15).also(content::addView)
         button(content, "アクセシビリティ設定") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-        button(content, "DMMブックスを開く") {
-            val app = packageManager.getLaunchIntentForPackage(DMM_BOOKS)
-            if (app == null) serviceInfo.text = "Google Play版のDMMブックスをインストールしてください。"
-            else startActivity(app)
-        }
+        button(content, "DMMブックスを開く") { openDmm() }
         if (BuildConfig.DEBUG) {
             button(content, "自作ページで試す") { openFixture("join-a") }
             button(content, "文字量の多い自作ページで試す") { openFixture("body-dense") }
@@ -72,17 +69,38 @@ class ReaderActivity : Activity() {
         voices = Spinner(this).also(content::addView)
         voiceInfo = text("日本語オフライン音声を確認中…", 14).also(content::addView)
         button(content, "音声一覧を更新") { loadVoices() }
-        rate = slider(content, "読み上げ速度", selection.rate, 65, 165)
-        pitch = slider(content, "声の高さ", selection.pitch, 75, 130)
+        rate = slider(content, "読み上げ速度", selection.rate, 65, 165, preferences::saveRate)
+        pitch = slider(content, "声の高さ", selection.pitch, 75, 130, preferences::savePitch)
         preview = button(content, "サンプルを試聴") { audition() }
         if (BuildConfig.DEBUG) button(content, "音声冒頭を検証（自作）") { audition(exportSample = true) }
+        content.addView(text("ページ送り診断", 21))
+        val turn = preferences.turn()
+        val methods = TurnMethod.entries
+        content.addView(Spinner(this).apply {
+            adapter = ArrayAdapter(this@ReaderActivity, android.R.layout.simple_spinner_dropdown_item,
+                methods.map { it.label })
+            setSelection(methods.indexOf(turn.method))
+            onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, index: Int, id: Long) {
+                    preferences.saveTurnMethod(methods[index])
+                }
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+            }
+        })
         val direction = Switch(this).apply {
-            text = "次ページは右方向にスワイプ"
-            isChecked = preferences.rightward()
+            text = "次へ進む操作は右（オフで左）"
+            isChecked = turn.rightward
             setOnCheckedChangeListener { _, value -> preferences.saveDirection(value) }
             minHeight = dp(48)
         }
         content.addView(direction)
+        content.addView(Switch(this).apply {
+            text = "パネルを外してから0.55秒待つ"
+            isChecked = turn.delayed
+            setOnCheckedChangeListener { _, value -> preferences.saveTurnDelay(value) }
+            minHeight = dp(48)
+        })
+        button(content, "パネルなしでDMMのページ送りを試す") { openDmm(headless = true) }
         bookId = EditText(this).apply {
             setSingleLine()
             hint = "書籍別発音辞書のID（任意）"
@@ -94,6 +112,9 @@ class ReaderActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        val saved = preferences.speech()
+        rate.progress = (saved.rate * 100).roundToInt() - 65
+        pitch.progress = (saved.pitch * 100).roundToInt() - 75
         val own = ComponentName(this, ReaderAccessibility::class.java)
         val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
             .orEmpty().split(':').any { ComponentName.unflattenFromString(it) == own }
@@ -102,6 +123,16 @@ class ReaderActivity : Activity() {
         } else {
             "アクセシビリティ設定でEbook Auto Readerを有効にしてください。"
         }
+    }
+
+    private fun openDmm(headless: Boolean = false) {
+        val app = packageManager.getLaunchIntentForPackage(DMM_BOOKS)
+        if (app == null) {
+            serviceInfo.text = "Google Play版のDMMブックスをインストールしてください。"
+            return
+        }
+        if (headless) TurnDiagnosticRequest.arm()
+        startActivity(app)
     }
 
     private fun openFixture(page: String) {
@@ -188,7 +219,7 @@ class ReaderActivity : Activity() {
             bookId.error = "半角英数字・ハイフン・アンダースコアを64文字以内で入力してください。"
             return
         }
-        preferences.saveSpeech(settings())
+        if (voiceLoaded) preferences.saveVoice(settings().voice)
         preferences.saveBookId(id)
         voiceInfo.text = "設定を保存しました。"
     }
@@ -207,7 +238,9 @@ class ReaderActivity : Activity() {
         content.addView(this)
     }
 
-    private fun slider(content: LinearLayout, label: String, value: Float, min: Int, max: Int): SeekBar {
+    private fun slider(
+        content: LinearLayout, label: String, value: Float, min: Int, max: Int, save: (Float) -> Unit,
+    ): SeekBar {
         val caption = text("", 15).also(content::addView)
         return SeekBar(this).apply {
             contentDescription = label
@@ -217,6 +250,7 @@ class ReaderActivity : Activity() {
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
                     caption.text = "$label　${min + progress}%"
+                    if (fromUser) save((min + progress) / 100f)
                 }
                 override fun onStartTrackingTouch(bar: SeekBar?) = Unit
                 override fun onStopTrackingTouch(bar: SeekBar?) = Unit

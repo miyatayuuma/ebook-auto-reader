@@ -2,8 +2,9 @@ package io.github.ebookautoreader.reader
 
 data class Position(val page: Int, val line: Int, val offset: Int)
 data class Reading(val start: Int, val end: Int, val kana: String)
-data class SourceLine(val original: String, val ruby: List<Reading> = emptyList())
-data class SourceRange(val page: Int, val line: Int, val start: Int, val end: Int)
+data class LineBounds(val left: Int, val top: Int, val right: Int, val bottom: Int)
+data class SourceLine(val original: String, val ruby: List<Reading> = emptyList(), val bounds: LineBounds? = null)
+data class SourceRange(val page: Int, val line: Int, val start: Int, val end: Int, val bounds: LineBounds? = null)
 data class PageText(val lines: List<SourceLine>, val kind: PageKind)
 enum class PageKind { BODY, HEADING, BLANK, FIGURE }
 
@@ -64,11 +65,12 @@ internal data class Fragment(
     val offset: Int,
     val text: String,
     val readings: List<Reading>,
+    val bounds: LineBounds?,
 ) {
-    fun range(from: Int = 0, to: Int = text.length) = SourceRange(page, line, offset + from, offset + to)
+    fun range(from: Int = 0, to: Int = text.length) = SourceRange(page, line, offset + from, offset + to, bounds)
     fun clip(from: Int, to: Int) = Fragment(page, line, offset + from, text.substring(from, to),
         readings.filter { it.start >= from && it.end <= to }
-            .map { Reading(it.start - from, it.end - from, it.kana) })
+            .map { Reading(it.start - from, it.end - from, it.kana) }, bounds)
 }
 
 internal data class SpeechRange(val start: Int, val end: Int, val source: SourceRange)
@@ -95,7 +97,7 @@ internal class SentenceBuffer(private val pronunciations: Pronunciations) {
         }
         page.lines.forEachIndexed { lineIndex, line ->
             if (line.original.isNotBlank()) {
-                pending.add(Fragment(index, lineIndex, 0, line.original, pronunciations.apply(line)))
+                pending.add(Fragment(index, lineIndex, 0, line.original, pronunciations.apply(line), line.bounds))
             }
         }
         while (true) {

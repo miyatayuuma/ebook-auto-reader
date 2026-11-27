@@ -1,14 +1,13 @@
 package io.github.ebookautoreader.reader
 
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.async
-import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.Closeable
@@ -23,9 +22,17 @@ internal interface ReaderPages {
     suspend fun prepareTurn(forward: Boolean, previous: PageSignature): suspend () -> PageFrame
     suspend fun read(frame: PageFrame): PageText
 }
+internal const val MAX_CLIP_BYTES = 4L * 1024 * 1024
+
+internal interface ReaderClip : Closeable {
+    val durationMs: Int
+    val bytes: Long
+}
+
 internal interface ReaderAudio {
-    suspend fun synthesize(unit: ReadingUnit): Closeable
-    suspend fun play(audio: Closeable, started: () -> Unit, progress: (Int) -> Unit)
+    val rate: Float
+    suspend fun synthesize(unit: ReadingUnit): ReaderClip
+    suspend fun play(audio: ReaderClip, started: () -> Unit, progress: (Int) -> Unit)
 }
 
 internal enum class ReaderStage { CAPTURE, OCR, SYNTHESIS, PLAYBACK, NEXT, RESTORE }
@@ -34,6 +41,8 @@ internal data class ReaderState(
     val ocr: Int? = null,
     val synthesized: Position? = null,
     val playing: Position? = null,
+    val completed: Position? = null,
+    val bufferMs: Long = 0,
     val confirmed: Position? = null,
     val milliseconds: Int = 0,
     val stage: ReaderStage = ReaderStage.CAPTURE,
@@ -44,18 +53,28 @@ internal class ReaderSession(
     private val audio: ReaderAudio,
     pronunciations: Pronunciations,
     private val report: (ReaderState) -> Unit,
+    private val startupBufferMs: Long = 0,
+    private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val log: (String) -> Unit = {},
 ) {
-    private data class KnownPage(val index: Int, val signature: PageSignature)
-    private data class Prepared(val unit: ReadingUnit, val audio: Closeable) : Closeable by audio
+    private companion object {
+        const val AHEAD_PAGES = 4
+        const val BUFFER_TARGET_MS = 20_000
+        const val MAX_CLIPS = 8
+    }
 
+    private data class KnownPage(val index: Int, val signature: PageSignature)
+    private class Pending(val unit: ReadingUnit, var clip: ReaderClip? = null)
+
+    // Both producer coroutines and playback own this state on the caller's dispatcher.
+    // Device OCR and file work switch dispatchers inside their respective ports.
     private val sentences = SentenceBuffer(pronunciations)
     private val known = mutableMapOf<Int, KnownPage>()
     private val recent = ArrayDeque<PageSignature>()
+    private val pending = ArrayDeque<Pending>()
+    private val changes = MutableStateFlow(0L)
     private var cursor: KnownPage? = null
     private var decoded = -1
-    private var blankPage: Int? = null
-    private var unfinished: ReadingUnit? = null
-    private var queued: ReadingUnit? = null
     private var reachedFailure: ReaderFailure? = null
     private var trusted = true
     var restoreFailure: ReaderFailure? = null
@@ -63,67 +82,170 @@ internal class ReaderSession(
     private var state = ReaderState()
 
     private fun update(value: ReaderState) {
-        state = value
-        report(value)
+        val elapsed = if (value.playing != null) value.milliseconds else 0
+        state = value.copy(bufferMs = availableMs(elapsed))
+        report(state)
+        changes.value++
     }
 
-    suspend fun run() = supervisorScope {
-        verifyOrStart()
-        var prepared: Prepared? = null
-        var waiting: Prepared? = null
-        var ahead: Deferred<Prepared?>? = null
-        var pageTask: Deferred<Unit>? = null
+    private fun availableMs(elapsed: Int = if (state.playing != null) state.milliseconds else 0): Long {
+        val sourceMs = pending.sumOf { it.clip?.durationMs?.toLong() ?: 0 }
+        return ((sourceMs - elapsed).coerceAtLeast(0) / audio.rate.toDouble()).toLong()
+    }
+
+    private fun clipCount() = pending.count { it.clip != null }
+
+    suspend fun run() {
         try {
-            while (true) {
-                if (unfinished == null && queued == null && !sentences.hasUnit()) pageTask?.await()
-                if (!trusted && reachedFailure != null) throw requireNotNull(reachedFailure)
-                val unit = unfinished ?: takeNext().also { unfinished = it }
-                if (requireNotNull(cursor).index < unit.start.page) {
-                    pageTask?.await()
-                    for (next in requireNotNull(cursor).index + 1..unit.start.page) {
-                        check(next in known)
-                        move(forward = true, target = next).close()
-                    }
-                }
-                val current = prepared ?: prepare(unit).also { prepared = it }
-                check(current.unit === unit)
-                val prefetchStarted = CompletableDeferred<Deferred<Unit>?>()
-                ahead = async {
-                    val nextUnit = reserveNext() ?: run {
-                        prefetchStarted.await()?.await()
-                        reserveNext()
-                    }
-                    nextUnit?.let { prepare(it) }?.also { waiting = it }
-                }
-                audio.play(current.audio, started = {
-                    update(state.copy(playing = unit.start, confirmed = unit.start,
-                        milliseconds = 0, stage = ReaderStage.PLAYBACK))
-                    if (pageTask?.isActive != true && reachedFailure == null) {
-                        pageTask = async { prefetch(unit.start.page) }
-                    }
-                    prefetchStarted.complete(pageTask)
-                }, progress = { ms -> update(state.copy(milliseconds = ms)) })
-                update(state.copy(playing = null, confirmed = unit.end, stage = ReaderStage.NEXT))
-                unfinished = null
-                prefetchStarted.complete(pageTask)
-                prepared = null
-                current.close()
-                prepared = ahead.await()
-                waiting = null
-                ahead = null
-                val keepFrom = minOf(unit.end.page, requireNotNull(cursor).index)
-                known.keys.removeAll { it < keepFrom }
-                if ((blankPage ?: Int.MAX_VALUE) < unit.end.page) blankPage = null
+            coroutineScope {
+                val resuming = cursor != null
+                verifyOrStart()
+                launch { producePages() }
+                launch { produceAudio() }
+                consume(initialBuffer = !resuming && startupBufferMs > 0)
             }
         } finally {
-            withContext(NonCancellable) {
-                ahead?.cancel()
-                pageTask?.cancelAndJoin()
-                ahead?.cancelAndJoin()
+            // Structured cancellation has joined both workers, including any dispatched turn.
+            // Keep the source units for replay, and release every prepared player and WAV.
+            pending.forEach { entry ->
+                entry.clip?.close()
+                entry.clip = null
             }
-            prepared?.close()
-            waiting?.close()
-            update(state.copy(playing = null, milliseconds = 0))
+            update(state.copy(playing = null, synthesized = null, milliseconds = 0))
+        }
+    }
+
+    private suspend fun consume(initialBuffer: Boolean) {
+        var fillAtStart = initialBuffer
+        var lastEnd: Long? = null
+        var lastStartPage: Int? = null
+        var starvations = 0
+        var totalWait = 0L
+        try {
+            while (true) {
+                val current = pending.firstOrNull()
+                val clip = current?.clip
+                if (clip == null) {
+                    if (current == null && !sentences.hasUnit()) reachedFailure?.let { throw it }
+                    update(state.copy(playing = null, stage = ReaderStage.NEXT))
+                    if (lastEnd != null) starvations++
+                    val waitStarted = clock()
+                    try {
+                        changes.first {
+                            pending.firstOrNull()?.clip != null ||
+                                (reachedFailure != null && pending.isEmpty() && !sentences.hasUnit())
+                        }
+                    } finally {
+                        if (lastEnd != null) {
+                            val wait = clock() - waitStarted
+                            totalWait += wait
+                            log("buffer wait ms=$wait")
+                        }
+                    }
+                    continue
+                }
+
+                if (fillAtStart) {
+                    fillAtStart = false
+                    val start = clock()
+                    withTimeoutOrNull(9_000) {
+                        changes.first {
+                            availableMs() >= startupBufferMs || reachedFailure != null || clipCount() >= MAX_CLIPS
+                        }
+                    }
+                    log("buffer startup fillMs=${clock() - start} remainingMs=${availableMs()}")
+                }
+                val unit = requireNotNull(current).unit
+                var startedAt: Long? = null
+                audio.play(clip, started = {
+                    val now = clock()
+                    val gap = lastEnd?.let { now - it }
+                    startedAt = now
+                    update(state.copy(playing = unit.start, confirmed = unit.start,
+                        milliseconds = 0, stage = ReaderStage.PLAYBACK))
+                    log("buffer start page=${unit.start.page} remainingMs=${state.bufferMs}" +
+                        " gaps=$starvations gapMs=${gap ?: 0}" +
+                        " pageBoundaryMs=${if (lastStartPage != null && lastStartPage != unit.start.page) gap else null}")
+                }, progress = { ms -> update(state.copy(milliseconds = ms)) })
+                val now = clock()
+                log("audio completed page=${unit.end.page} wallMs=${startedAt?.let { now - it }} sourceMs=${clip.durationMs}")
+                lastEnd = now
+                lastStartPage = unit.start.page
+                pending.removeFirst()
+                clip.close()
+                known.keys.removeAll { it < minOf(unit.end.page, requireNotNull(cursor).index) }
+                update(state.copy(playing = null, completed = unit.end, confirmed = unit.end,
+                    milliseconds = 0, stage = ReaderStage.NEXT))
+            }
+        } finally {
+            log("buffer stop gaps=$starvations waitMs=$totalWait")
+        }
+    }
+
+    private suspend fun producePages() {
+        var lastCheck = clock()
+        while (true) {
+            val version = changes.value
+            val from = state.confirmed?.page ?: 0
+            val limit = from + AHEAD_PAGES
+            val visible = requireNotNull(cursor).index
+            try {
+                when {
+                    visible < from -> {
+                        move(forward = true, target = visible + 1).close()
+                        lastCheck = clock()
+                    }
+                    reachedFailure != null -> return
+                    decoded < limit && availableMs() < BUFFER_TARGET_MS && clipCount() < MAX_CLIPS -> {
+                        loadNext()
+                        lastCheck = clock()
+                    }
+                    decoded >= limit && pending.isEmpty() && !sentences.hasUnit() -> {
+                        if (sentences.oldestPage() == null) {
+                            throw ReaderFailure("先読み範囲内に本文がありません。表示を確認してください。")
+                        }
+                        sentences.flush()
+                        update(state)
+                    }
+                    clock() - lastCheck >= 3_000 -> {
+                        verifyCursor()
+                        lastCheck = clock()
+                    }
+                    else -> changes.first { it != version }
+                }
+            } catch (failure: ReaderFailure) {
+                reachedFailure = failure
+                log("prefetch stopped reason=${failure.reason}")
+                if (!trusted) throw failure
+                if (failure.reason == "page_unchanged") sentences.flush()
+                update(state)
+                return
+            }
+        }
+    }
+
+    private suspend fun produceAudio() {
+        while (true) {
+            val version = changes.value
+            if (clipCount() >= MAX_CLIPS || availableMs() >= BUFFER_TARGET_MS) {
+                changes.first { it != version }
+                continue
+            }
+            val entry = pending.firstOrNull { it.clip == null }
+                ?: sentences.poll()?.let { Pending(it).also(pending::addLast) }
+            if (entry == null) {
+                changes.first { it != version }
+                continue
+            }
+            if (state.playing == null) update(state.copy(stage = ReaderStage.SYNTHESIS))
+            val clip = audio.synthesize(entry.unit)
+            if (clip.bytes > MAX_CLIP_BYTES || clip.durationMs <= 0) {
+                clip.close()
+                throw ReaderFailure("合成音声の容量または長さが不正です。", "audio_clip_limit")
+            }
+            entry.clip = clip
+            update(state.copy(synthesized = entry.unit.end))
+            log("buffer prepared page=${entry.unit.end.page} clips=${clipCount()} remainingMs=${state.bufferMs}")
         }
     }
 
@@ -143,56 +265,6 @@ internal class ReaderSession(
             }
         }
     }
-
-    private suspend fun prepare(unit: ReadingUnit): Prepared {
-        if (state.playing == null) update(state.copy(stage = ReaderStage.SYNTHESIS))
-        val clip = audio.synthesize(unit)
-        try {
-            update(state.copy(synthesized = unit.end))
-            return Prepared(unit, clip)
-        } catch (error: Throwable) {
-            clip.close()
-            throw error
-        }
-    }
-
-    private suspend fun prefetch(playingPage: Int) {
-        try {
-            val visible = requireNotNull(cursor)
-            val limit = limitFrom(playingPage)
-            if (visible.index < decoded && visible.index < limit) {
-                move(forward = true, target = visible.index + 1).close()
-            }
-            if (decoded < limit) loadNext()
-        } catch (failure: ReaderFailure) {
-            reachedFailure = failure
-        }
-    }
-
-    private fun reserveNext(): ReadingUnit? = queued ?: sentences.poll()?.also { queued = it }
-
-    private suspend fun takeNext(): ReadingUnit {
-        queued?.let {
-            queued = null
-            return it
-        }
-        while (!sentences.hasUnit()) {
-            reachedFailure?.let { throw it }
-            val oldest = sentences.oldestPage()
-            if (oldest != null && decoded >= limitFrom(oldest)) {
-                sentences.flush()
-                break
-            }
-            val limit = limitFrom(state.confirmed?.page ?: 0)
-            if (decoded >= limit && oldest == null) {
-                throw ReaderFailure("先読み先に本文がありません。表示ページを確認してください。")
-            }
-            loadNext()
-        }
-        return requireNotNull(sentences.poll())
-    }
-
-    private fun limitFrom(page: Int) = if (blankPage == page + 1) page + 2 else page + 1
 
     private suspend fun loadNext() {
         val target = decoded + 1
@@ -217,7 +289,6 @@ internal class ReaderSession(
         }
         sentences.add(index, page)
         decoded = index
-        if (page.kind == PageKind.BLANK && blankPage == null) blankPage = index
         update(state.copy(ocr = index, stage = if (state.playing == null) ReaderStage.NEXT else ReaderStage.PLAYBACK))
     }
 
@@ -231,7 +302,13 @@ internal class ReaderSession(
     }
 
     private suspend fun checkedCapture(expected: KnownPage): PageFrame {
-        val frame = pages.capture()
+        val frame = try {
+            pages.capture()
+        } catch (failure: ReaderFailure) {
+            trusted = false
+            update(state.copy(displayed = null))
+            throw failure
+        }
         if (frame.signature.matches(expected.signature)) return frame
         frame.close()
         trusted = false
@@ -298,7 +375,7 @@ internal class ReaderSession(
         val from = cursor ?: return true
         val target = state.confirmed?.page ?: 0
         val destination = if (from.index >= target) target..from.index else from.index..target
-        if (destination.last - destination.first > 2 || destination.any { it !in known }) return false
+        if (destination.last - destination.first > AHEAD_PAGES || destination.any { it !in known }) return false
         update(state.copy(stage = ReaderStage.RESTORE))
         return try {
             verifyCursor()

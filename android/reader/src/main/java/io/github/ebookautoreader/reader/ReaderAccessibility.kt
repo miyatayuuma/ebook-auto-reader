@@ -19,6 +19,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -59,6 +60,8 @@ class ReaderAccessibility : AccessibilityService() {
     private var controls: FloatingControls? = null
     private var gestureAllowed = false
     private var testingTurn = false
+    private var headlessTest = false
+    private var turnObservation: CompletableDeferred<Unit>? = null
     private var restoring = false
     private var collapseOnPlayback = false
     private var voiceFallback = false
@@ -72,6 +75,20 @@ class ReaderAccessibility : AccessibilityService() {
     private var registered = false
     private var targetMissing = false
 
+    private val speechPreferenceChanged = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "rate") {
+            val next = preferences.speech().rate
+            try {
+                audio?.setRate(next)
+                ReaderDiagnostics.event("playback rate_percent=${(next * 100).roundToInt()}")
+            } catch (error: RuntimeException) {
+                ReaderDiagnostics.event("playback rate_failed type=${error.javaClass.simpleName}")
+                status = "現在の音声に速度を適用できませんでした。"
+            }
+            render()
+        }
+    }
+
     private val refresh = Runnable { refreshWindow() }
     private val confirmWindowLoss = Runnable { refreshWindow(confirmLoss = true) }
     private val screenState = object : BroadcastReceiver() {
@@ -83,6 +100,7 @@ class ReaderAccessibility : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         if (!registered) {
+            preferences.observe(speechPreferenceChanged)
             registerReceiver(screenState, IntentFilter().apply {
                 addAction(Intent.ACTION_SCREEN_OFF)
                 addAction(Intent.ACTION_USER_PRESENT)
@@ -127,7 +145,7 @@ class ReaderAccessibility : AccessibilityService() {
         val target = currentWindow()
         val bound = probeWindow ?: sessionWindow
         val lost = target == null || (bound != null && bound != target)
-        if (lost && controls != null && !confirmLoss) {
+        if (lost && (controls != null || headlessTest) && !confirmLoss) {
             if (!targetMissing) {
                 targetMissing = true
                 handler.postDelayed(confirmWindowLoss, 160)
@@ -145,6 +163,11 @@ class ReaderAccessibility : AccessibilityService() {
             }
         }
         if (target != null && controls != null) panelWindow = target
+        if (target?.owner == DMM_BOOKS && mode == Mode.IDLE && controls == null && TurnDiagnosticRequest.take()) {
+            runTurnTest(target, headless = true)
+            return
+        }
+        if (headlessTest) return
         if (target != null && controls == null) {
             val next = FloatingControls(this, manager, primaryAction = {
                 when (mode) {
@@ -177,7 +200,7 @@ class ReaderAccessibility : AccessibilityService() {
 
     private fun refreshGuard() {
         val reading = mode == Mode.READING && ocrProgress?.timedOut != true
-        val locked = reading || restoring || testingTurn
+        val locked = reading || restoring || testingTurn || (mode == Mode.BUSY && session != null)
         controls?.guardTouches(locked && !gestureAllowed, locked)
     }
 
@@ -188,22 +211,15 @@ class ReaderAccessibility : AccessibilityService() {
             else -> "読み上げ開始"
         }, canAct = mode == Mode.IDLE || mode == Mode.PAUSED || mode == Mode.READING,
             canEnd = mode == Mode.READING || mode == Mode.PAUSED || mode == Mode.PROBE,
-            canProbe = mode == Mode.IDLE || mode == Mode.PAUSED, canTestTurn = mode == Mode.IDLE,
+            canProbe = mode == Mode.IDLE || mode == Mode.PAUSED,
+            canTestTurn = mode == Mode.IDLE || turnObservation != null, confirmingTurn = turnObservation != null,
             rate = preferences.speech().rate)
     }
 
     private fun adjustRate(step: Int) {
         val current = (preferences.speech().rate * 100).roundToInt()
         val next = ((current + step * 10) / 100f).coerceIn(MIN_SPEECH_RATE, MAX_SPEECH_RATE)
-        try {
-            audio?.setRate(next)
-            preferences.saveRate(next)
-            ReaderDiagnostics.event("playback rate_percent=${(next * 100).roundToInt()}")
-        } catch (error: RuntimeException) {
-            ReaderDiagnostics.event("playback rate_failed type=${error.javaClass.simpleName}")
-            status = "現在の再生速度を変更できませんでした。"
-        }
-        render()
+        preferences.saveRate(next)
     }
 
     private fun change(next: Mode, message: String, expand: Boolean = false) {
@@ -241,10 +257,12 @@ class ReaderAccessibility : AccessibilityService() {
         change(Mode.IDLE, userMessage(error), expand = true)
     }
 
-    private fun pagePort(target: ReaderWindow, engine: OnDeviceOcr? = null) = WindowPages(
+    private fun pagePort(
+        target: ReaderWindow, engine: OnDeviceOcr? = null, settings: TurnSettings = preferences.turn(),
+    ) = WindowPages(
         this, { currentWindow()?.takeIf { it == target } }, ::withoutOverlays,
         { hasReaderMenu(target) }, ::awaitScreenshotSlot,
-        if (target.owner == DMM_BOOKS) preferences.rightward() else true,
+        settings,
     ) { frame ->
         requireNotNull(engine).read(frame.bitmap, frame.uniformLight) {
             ocrProgress = it
@@ -256,23 +274,36 @@ class ReaderAccessibility : AccessibilityService() {
         }
     }
 
-    private suspend fun withoutOverlays(send: suspend () -> Unit) {
-        val panel = controls ?: throw ReaderFailure("操作パネルのウィンドウがありません。", "window_changed")
+    private suspend fun withoutOverlays(delayed: Boolean, send: suspend () -> PageFrame): PageFrame {
+        val panel = controls
+        if (headlessTest && panel == null) {
+            ReaderDiagnostics.event("gesture overlays=never_attached")
+            return send()
+        }
+        if (panel == null) throw ReaderFailure("操作パネルのウィンドウがありません。", "window_changed")
         gestureAllowed = true
+        var frame: PageFrame? = null
         try {
-            panel.suspendWindows()
-            repeat(2) { awaitDisplayFrame() }
-            if (!panel.windowsDetached()) {
-                throw ReaderFailure("操作パネルのタッチ解除を確認できません。", "overlay_detach_unconfirmed")
+            try {
+                panel.suspendWindows()
+                repeat(2) { awaitDisplayFrame() }
+                if (delayed) delay(550)
+                if (!panel.windowsDetached()) {
+                    throw ReaderFailure("操作パネルのタッチ解除を確認できません。", "overlay_detach_unconfirmed")
+                }
+                ReaderDiagnostics.event("gesture overlays=detached display_frames=2 delayMs=${if (delayed) 550 else 0}")
+                frame = send()
+            } finally {
+                gestureAllowed = false
+                if (controls === panel) {
+                    refreshGuard()
+                    panel.resumeWindows()
+                }
             }
-            ReaderDiagnostics.event("gesture overlays=detached display_frames=2")
-            send()
-        } finally {
-            gestureAllowed = false
-            if (controls === panel) {
-                refreshGuard()
-                panel.resumeWindows()
-            }
+            return requireNotNull(frame)
+        } catch (error: Throwable) {
+            frame?.close()
+            throw error
         }
     }
 
@@ -344,35 +375,58 @@ class ReaderAccessibility : AccessibilityService() {
     }
 
     private fun testTurn() {
+        turnObservation?.let {
+            it.complete(Unit)
+            return
+        }
         if (mode != Mode.IDLE) return
-        val target = currentWindow() ?: return
+        currentWindow()?.let { runTurnTest(it, headless = false) }
+    }
+
+    private fun runTurnTest(target: ReaderWindow, headless: Boolean) {
+        val settings = preferences.turn()
+        val fixture = target.owner != DMM_BOOKS
         probeWindow = target
         testingTurn = true
-        change(Mode.PROBE, "ページ送りと復元を確認中…")
+        headlessTest = headless
+        change(Mode.PROBE, "${settings.method.label}で移動を確認中…")
         operate("turn_test") {
             var mayHaveMoved = false
             val outcome = try {
-                val pages = pagePort(target)
+                if (headless) delay(3_000)
+                val pages = pagePort(target, settings = settings)
                 val origin = pages.capture().use { it.signature }
                 val next = pages.prepareTurn(forward = true, previous = origin)
-                withContext(NonCancellable) {
-                    mayHaveMoved = true
-                    val destination = withTimeoutOrNull(8_000) { next().use { it.signature } }
-                        ?: throw ReaderFailure("送り先の表示を確認できません。", "page_in_transition")
-                    if (destination.matches(origin)) {
-                        mayHaveMoved = false
-                        throw ReaderFailure("ページが変わりませんでした。書籍の途中で操作方向を確認してください。", "page_unchanged")
-                    }
-                    val back = pages.prepareTurn(forward = false, previous = destination)
-                    val returned = withTimeoutOrNull(8_000) { back().use { it.signature } }
-                        ?: throw ReaderFailure("復元先の表示を確認できません。", "page_in_transition")
-                    if (!returned.matches(origin)) {
-                        throw ReaderFailure("逆方向の操作で元のページに戻れませんでした。", "page_restore_mismatch")
-                    }
+                mayHaveMoved = true
+                val destination = finishTestTurn(next)
+                if (destination.matches(origin)) {
                     mayHaveMoved = false
+                    throw ReaderFailure("ページが変わりませんでした。書籍の途中で操作方向を確認してください。", "page_unchanged")
                 }
-                ReaderDiagnostics.event("page turn test result=round_trip_ok")
-                "1回送って元のページに戻りました。"
+                if (!fixture) {
+                    val confirmed = CompletableDeferred<Unit>()
+                    turnObservation = confirmed
+                    headlessTest = false
+                    refreshWindow()
+                    change(Mode.PROBE, "表示が変わりました。次へ1ページ進んだか目視で確認してください。", expand = true)
+                    withTimeoutOrNull(45_000) { confirmed.await() }
+                        ?: throw ReaderFailure("移動方向とページ数を確認できませんでした。", "page_direction_unconfirmed")
+                    turnObservation = null
+                    ReaderDiagnostics.event("page direction source=user delta=1 forward=true")
+                    change(Mode.PROBE, "逆方向に送って元の表示を確認中…")
+                }
+                val returned = finishTestTurn(pages.prepareTurn(forward = false, previous = destination))
+                if (!returned.matches(origin)) {
+                    throw ReaderFailure("逆方向の操作で元のページに戻れませんでした。", "page_restore_mismatch")
+                }
+                mayHaveMoved = false
+                if (!headless && !fixture) preferences.confirmTurn(settings)
+                ReaderDiagnostics.event("page turn test result=round_trip_ok method=${settings.method} initialHeadless=$headless")
+                when {
+                    headless -> "パネルなしで1ページ移動し、元に戻りました。通常のパネルからも往復を確認してください。"
+                    fixture -> "自作ページが1ページ進み、元に戻りました。"
+                    else -> "1ページ進み、元のページに戻りました。${settings.method.label}を読み上げに設定しました。"
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -381,11 +435,21 @@ class ReaderAccessibility : AccessibilityService() {
             } finally {
                 probeWindow = null
                 testingTurn = false
+                headlessTest = false
+                turnObservation = null
                 refreshGuard()
             }
             change(Mode.IDLE, outcome, expand = true)
+            refreshWindow()
+            controls?.expand(true)
         }
     }
+
+    private suspend fun finishTestTurn(turn: suspend () -> PageFrame): PageSignature =
+        withContext(NonCancellable) {
+            withTimeoutOrNull(8_000) { turn().use { it.signature } }
+                ?: throw ReaderFailure("移動後の表示を確認できません。", "page_in_transition")
+        }
 
     private fun start() {
         if (mode != Mode.IDLE && mode != Mode.PAUSED) return
@@ -394,12 +458,16 @@ class ReaderAccessibility : AccessibilityService() {
             clearSession()
             return change(Mode.IDLE, "対象の表示が変わりました。読み上げを開始し直してください。", expand = true)
         }
+        val settings = preferences.turn()
+        if (target.owner == DMM_BOOKS && !preferences.verifiedTurn(settings)) {
+            return change(mode, "先に「ページ送り・復元テスト」で移動方向と復元を確認してください。", expand = true)
+        }
         sessionWindow = target
         collapseOnPlayback = true
         change(Mode.READING, "準備中…")
         operate("read") {
             try {
-                val current = session ?: createSession(target).also { session = it }
+                val current = session ?: createSession(target, settings).also { session = it }
                 audio?.startOutput()
                 current.run()
             } catch (error: CancellationException) {
@@ -415,11 +483,11 @@ class ReaderAccessibility : AccessibilityService() {
         }
     }
 
-    private fun createSession(target: ReaderWindow): ReaderSession {
+    private fun createSession(target: ReaderWindow, settings: TurnSettings): ReaderSession {
         val pronunciations = preferences.pronunciations(filesDir)
         val createdOcr = OnDeviceOcr(filesDir.resolve("ndl")).also { ocr = it }
         val createdSpeech = DeviceSpeech(this).also { speech = it }
-        val audio = DeviceAudio(this, createdSpeech, preferences.speech(), reportSynthesis = {
+        val audio = DeviceAudio(this, createdSpeech, preferences, reportSynthesis = {
             synthesis = it
             updateReadingStatus()
         }, reportPlayback = {
@@ -430,15 +498,18 @@ class ReaderAccessibility : AccessibilityService() {
             updateReadingStatus()
         }
         this.audio = audio
-        return ReaderSession(pagePort(target, createdOcr), audio, pronunciations, ::onState)
+        return ReaderSession(pagePort(target, createdOcr, settings), audio, pronunciations, ::onState,
+            startupBufferMs = 8_000, clock = SystemClock::elapsedRealtime, log = ReaderDiagnostics::event)
     }
 
     private fun onState(state: ReaderState) {
         val previous = lastState
         lastState = state
-        if (previous?.stage != state.stage || previous.displayed != state.displayed || previous.ocr != state.ocr) {
-            ReaderDiagnostics.event("session stage=${state.stage} displayed=${state.displayed}" +
-                " ocrPage=${state.ocr} jobActive=${job?.isActive == true}")
+        if (previous?.stage != state.stage || previous.displayed != state.displayed || previous.ocr != state.ocr ||
+            previous.synthesized != state.synthesized || previous.playing != state.playing ||
+            previous.completed != state.completed) {
+            ReaderDiagnostics.event("session stage=${state.stage} displayed=${state.displayed} ocrPage=${state.ocr}" +
+                " synthesized=${state.synthesized} playing=${state.playing} completed=${state.completed}")
         }
         if (mode == Mode.READING && state.playing != null && collapseOnPlayback) {
             collapseOnPlayback = false
@@ -466,9 +537,12 @@ class ReaderAccessibility : AccessibilityService() {
             state?.stage == ReaderStage.CAPTURE -> "画面取得中"
             state?.displayed == null && state?.ocr != null -> "ページの遷移を確認中"
             state?.stage == ReaderStage.RESTORE -> "表示ページを復元中"
+            state?.confirmed == null && (state?.bufferMs ?: 0) > 0 -> "先読み音声を準備中"
             else -> "次の文を準備中"
         }
-        val next = text + if (voiceFallback) "\n代替のオフライン音声" else ""
+        val visible = state?.displayed?.plus(1)
+        val positions = if (visible != null) "\n表示 ${visible}ページ · バッファ ${state.bufferMs / 1000}秒" else ""
+        val next = text + positions + if (voiceFallback) "\n代替のオフライン音声" else ""
         if (next != status) {
             status = next
             render()
@@ -496,6 +570,7 @@ class ReaderAccessibility : AccessibilityService() {
         if (mode == Mode.IDLE || mode == Mode.BUSY) return
         val previous = job
         val wasProbe = mode == Mode.PROBE
+        val wasTurnTest = testingTurn
         change(Mode.BUSY, "処理を停止中…", expand = true)
         previous?.cancel()
         operate(if (pause) "pause" else "stop") {
@@ -511,6 +586,7 @@ class ReaderAccessibility : AccessibilityService() {
                 clearSession()
                 change(Mode.IDLE, when {
                     !sync -> "対象ウィンドウが変わったため停止しました。"
+                    wasTurnTest -> "ページ送り診断を終了しました。現在のページを確認してください。"
                     wasProbe && synchronized -> "画面取得を終了しました。"
                     synchronized -> "終了 · 読み上げ位置に表示を同期"
                     restoreFailure != null -> "停止 · $restoreFailure 表示ページを手動で確認してください。"
@@ -552,7 +628,10 @@ class ReaderAccessibility : AccessibilityService() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
-        if (registered) unregisterReceiver(screenState)
+        if (registered) {
+            preferences.removeObserver(speechPreferenceChanged)
+            unregisterReceiver(screenState)
+        }
         detachPanel()
         lifetime.invokeOnCompletion { mainExecutor.execute { clearSession() } }
         lifetime.cancel()
@@ -562,4 +641,17 @@ class ReaderAccessibility : AccessibilityService() {
 
 internal object DebugPages {
     var visible = false
+    var page: Int? = null
+}
+
+internal object TurnDiagnosticRequest {
+    private var deadline = 0L
+
+    fun arm() { deadline = SystemClock.elapsedRealtime() + 20_000 }
+
+    fun take(): Boolean {
+        val requested = deadline > SystemClock.elapsedRealtime()
+        deadline = 0
+        return requested
+    }
 }

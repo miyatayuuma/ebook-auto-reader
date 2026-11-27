@@ -230,12 +230,13 @@ internal class FloatingControls(
 
     fun render(
         message: String, playing: Boolean, action: String, canAct: Boolean, canEnd: Boolean,
-        canProbe: Boolean, canTestTurn: Boolean, rate: Float,
+        canProbe: Boolean, canTestTurn: Boolean, confirmingTurn: Boolean, rate: Float,
     ) {
+        val turnLabel = if (confirmingTurn) "次へ1ページ進んだ・復元" else "ページ送り・復元テスト"
         val formatted = String.format(java.util.Locale.JAPAN, "%.2f倍", rate)
         if (status == message && active == playing && primary.text == action && primary.isEnabled == canAct &&
             end.isEnabled == canEnd && probe.isEnabled == canProbe && turnTest.isEnabled == canTestTurn &&
-            speed.text == formatted) return
+            speed.text == formatted && turnTest.text == turnLabel) return
         status = message
         active = playing
         label.text = message
@@ -245,7 +246,7 @@ internal class FloatingControls(
         end.isEnabled = canEnd
         probe.text = "画面取得テスト"
         probe.isEnabled = canProbe
-        turnTest.text = "ページ送り・復元テスト"
+        turnTest.text = turnLabel
         turnTest.isEnabled = canTestTurn
         probe.visibility = if (canProbe) View.VISIBLE else View.GONE
         turnTest.visibility = if (canTestTurn) View.VISIBLE else View.GONE
