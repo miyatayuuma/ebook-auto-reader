@@ -129,6 +129,24 @@ class ReflowLayoutTest {
     }
 
     @Test
+    fun sizeEvidenceDoesNotTurnShortTextIntoHeadingOrChangeSpeech() {
+        val normal = listOf(300, 250, 200).map { x ->
+            Region(Box(x, 100, x + 20, 400), 1, .95f, "通常本文。")
+        }
+        val large = Region(Box(400, 100, 432, 300), 1, .95f, "大きな文字。")
+        val result = ReflowLayout.read(normal + large, 500, 1000, false)
+        assertEquals(PageKind.BODY, result.kind)
+        assertEquals(4, result.lines.size)
+        val evidence = result.lines.single { it.original == large.text }.layout!!
+        assertEquals(32, evidence.estimatedSizePx)
+        assertEquals(1.6f, evidence.relativeSize!!, .001f)
+        assertEquals(LineRole.HEADING_CANDIDATE, evidence.role)
+        val short = ReflowLayout.read(listOf(normal.first()), 500, 1000, false).lines.single()
+        assertEquals(LineRole.BODY, short.layout!!.role)
+        assertNull(short.layout!!.relativeSize)
+    }
+
+    @Test
     fun separatelyGroupedTwoLineCaptionDoesNotBlockFigure() {
         // Synthetic geometry representing a figure with an independent,
         // closely fitting two-line caption block below it.

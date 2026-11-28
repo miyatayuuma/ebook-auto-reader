@@ -161,9 +161,27 @@ internal object ReflowLayout {
         }
         val ordered = order(substantive) + order(captions)
         reportBottomLines(ordered.count { it.box.bottom >= height * 0.87 })
-        return PageText(ordered.map { SourceLine(it.text, ruby[it].orEmpty(), it.box.let { box ->
-            LineBounds(box.left, box.top, box.right, box.bottom)
-        }) }, kind)
+        return PageText(ordered.map { line ->
+            val box = line.box
+            SourceLine(line.text, ruby[line].orEmpty(), LineBounds(box.left, box.top, box.right, box.bottom),
+                describeLine(line, substantive, visuals.isNotEmpty()))
+        }, kind)
+    }
+
+    // Descriptive evidence only: never discard or reorder a line using this estimate.
+    private fun describeLine(line: Region, body: List<Region>, hasVisual: Boolean): LineLayout {
+        fun size(region: Region) = if (region.vertical) region.box.width else region.box.height
+        val size = size(line).coerceAtLeast(0)
+        val references = body.filter { it.type == 1 && it.vertical == line.vertical &&
+            it.detection >= .68f && size(it) > 0 }.map(::size).sorted()
+        val ratio = if (references.size >= 3 && size > 0) size.toFloat() / references[references.size / 2] else null
+        val role = when {
+            line.type in setOf(2, 4, 5) -> if (hasVisual) LineRole.CAPTION else LineRole.UNKNOWN
+            line.type == 16 || (line.type == 1 && ratio != null && ratio >= 1.3f) -> LineRole.HEADING_CANDIDATE
+            line.type == 1 -> LineRole.BODY
+            else -> LineRole.UNKNOWN
+        }
+        return LineLayout(line.type, line.detection, line.certainty, line.vertical, size, ratio, role)
     }
 
     private fun explainedCaptionBlock(block: Box, captions: List<Region>): Boolean {

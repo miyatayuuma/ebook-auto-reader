@@ -42,6 +42,7 @@ internal data class OcrProgress(
 internal class OnDeviceOcr(
     private val models: File,
     private val bodyTopFraction: Double = 0.0,
+    private val pageCache: RecognizedPageCache? = null,
 ) : AutoCloseable {
     private companion object {
         // A service restart must also wait for any preceding native work to return.
@@ -50,6 +51,40 @@ internal class OnDeviceOcr(
     }
 
     private var recognizer: NdlRecognizer? = null
+    private val modelFingerprint by lazy {
+        if (pageCache == null || !models.resolve(".p2-verified").isFile) null
+        else try {
+            // A model update must not reuse stale OCR, even with identical screen pixels.
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            for (name in listOf("deim.onnx", "parseq.onnx", "charset.json")) {
+                digest.update(name.toByteArray(Charsets.UTF_8))
+                models.resolve(name).inputStream().buffered().use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        digest.update(buffer, 0, count)
+                    }
+                }
+            }
+            digest.digest()
+        } catch (_: java.io.IOException) { null }
+    }
+
+    private fun cacheKey(image: Bitmap, bodyTop: Int): String? {
+        val fingerprint = modelFingerprint ?: return null
+        val digest = PageCacheKey.digest(image.width, image.height, bodyTop, fingerprint)
+        val row = IntArray(image.width)
+        val bytes = java.nio.ByteBuffer.allocate(image.width * 4)
+        val ints = bytes.asIntBuffer()
+        for (y in 0 until image.height) {
+            image.getPixels(row, 0, image.width, 0, y, image.width, 1)
+            ints.clear()
+            ints.put(row)
+            digest.update(bytes.array())
+        }
+        return PageCacheKey.hex(digest.digest())
+    }
 
     suspend fun read(image: Bitmap, uniformLight: Boolean, report: (OcrProgress?) -> Unit): PageText =
         coroutineScope {
@@ -77,12 +112,26 @@ internal class OnDeviceOcr(
                     }
                 }) {
                     nativeOcr.withLock {
+                        val lookupStart = SystemClock.elapsedRealtime()
+                        val key = cacheKey(image, bodyTop)
+                        val cached = key?.let { pageCache?.get(it) }
+                        if (cached != null) {
+                            classification = "kind=${cached.kind} reason=cache_hit"
+                            ReaderDiagnostics.event("ocr cache hit kind=${cached.kind} lines=${cached.lines.size} ms=${SystemClock.elapsedRealtime() - lookupStart}")
+                            return@withLock cached
+                        }
+                        if (key != null) ReaderDiagnostics.event("ocr cache miss ms=${SystemClock.elapsedRealtime() - lookupStart}")
                         val body = if (bodyTop == 0) image else
                             Bitmap.createBitmap(image, 0, bodyTop, image.width, image.height - bodyTop)
                         try {
-                            recognize(body, image.height, bodyTop,
+                            val page = recognize(body, image.height, bodyTop,
                                 uniformLight || (body !== image && isUniformLight(body)), cancellation,
                                 { classification = it }, { regionDetails += it }) { updates.value = it }
+                            if (key != null) {
+                                val stored = pageCache?.put(key, page) == true
+                                ReaderDiagnostics.event("ocr cache store success=$stored kind=${page.kind} lines=${page.lines.size}")
+                            }
+                            page
                         } finally {
                             if (body !== image) body.recycle()
                         }

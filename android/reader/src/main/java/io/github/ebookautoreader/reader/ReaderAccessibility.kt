@@ -505,7 +505,10 @@ class ReaderAccessibility : AccessibilityService() {
         val bodyTopFraction = if (target.owner == DMM_BOOKS)
             BodyOcrRange.topFraction(screen.top, screen.height(), target.bounds.top, target.bounds.height())
         else 0.0
-        val createdOcr = OnDeviceOcr(filesDir.resolve("ndl"), bodyTopFraction).also { ocr = it }
+        // Development-only, local reuse. noBackupFilesDir prevents cloud backup.
+        val cache = if (BuildConfig.DEBUG && target.owner == DMM_BOOKS)
+            RecognizedPageCache(noBackupFilesDir.resolve("recognized-pages-v1")) else null
+        val createdOcr = OnDeviceOcr(filesDir.resolve("ndl"), bodyTopFraction, cache).also { ocr = it }
         val createdSpeech = DeviceSpeech(this).also { speech = it }
         val audio = DeviceAudio(this, createdSpeech, preferences, reportSynthesis = {
             synthesis = it
