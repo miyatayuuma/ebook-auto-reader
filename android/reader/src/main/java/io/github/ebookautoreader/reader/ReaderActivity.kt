@@ -60,11 +60,6 @@ class ReaderActivity : Activity() {
         serviceInfo = text("", 15).also(content::addView)
         button(content, "アクセシビリティ設定") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         button(content, "DMMブックスを開く") { openDmm() }
-        if (BuildConfig.DEBUG) {
-            button(content, "自作ページで試す") { openFixture("join-a") }
-            button(content, "文字量の多い自作ページで試す") { openFixture("body-dense") }
-            button(content, "画面下端の自作ページで試す") { openFixture("body-bottom") }
-        }
         content.addView(text("音声設定", 21))
         voices = Spinner(this).also(content::addView)
         voiceInfo = text("日本語オフライン音声を確認中…", 14).also(content::addView)
@@ -72,21 +67,8 @@ class ReaderActivity : Activity() {
         rate = slider(content, "読み上げ速度", selection.rate, 65, 165, preferences::saveRate)
         pitch = slider(content, "声の高さ", selection.pitch, 75, 130, preferences::savePitch)
         preview = button(content, "サンプルを試聴") { audition() }
-        if (BuildConfig.DEBUG) button(content, "音声冒頭を検証（自作）") { audition(exportSample = true) }
-        content.addView(text("ページ送り診断", 21))
+        content.addView(text("ページ送り設定", 21))
         val turn = preferences.turn()
-        val methods = TurnMethod.entries
-        content.addView(Spinner(this).apply {
-            adapter = ArrayAdapter(this@ReaderActivity, android.R.layout.simple_spinner_dropdown_item,
-                methods.map { it.label })
-            setSelection(methods.indexOf(turn.method))
-            onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, index: Int, id: Long) {
-                    preferences.saveTurnMethod(methods[index])
-                }
-                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
-            }
-        })
         val direction = Switch(this).apply {
             text = "次へ進む操作は右（オフで左）"
             isChecked = turn.rightward
@@ -94,20 +76,16 @@ class ReaderActivity : Activity() {
             minHeight = dp(48)
         }
         content.addView(direction)
-        content.addView(Switch(this).apply {
-            text = "パネルを外してから0.55秒待つ"
-            isChecked = turn.delayed
-            setOnCheckedChangeListener { _, value -> preferences.saveTurnDelay(value) }
-            minHeight = dp(48)
-        })
-        button(content, "パネルなしでDMMのページ送りを試す") { openDmm(headless = true) }
         bookId = EditText(this).apply {
             setSingleLine()
             hint = "書籍別発音辞書のID（任意）"
             setText(preferences.bookId())
         }.also(content::addView)
         button(content, "設定を保存") { saveSettings() }
-        loadVoices()
+        if (BuildConfig.DEBUG && VoiceDiagnosticRequest.take()) {
+            audition(exportSample = true)
+            task?.invokeOnCompletion { scope.launch { loadVoices() } }
+        } else loadVoices()
     }
 
     override fun onResume() {
@@ -119,25 +97,19 @@ class ReaderActivity : Activity() {
         val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
             .orEmpty().split(':').any { ComponentName.unflattenFromString(it) == own }
         serviceInfo.text = if (enabled) {
-            "DMMブックスで縦書き本文を開き、画面端の ▶ を開き、「画面取得テスト」を押してください。"
+            "DMMブックスで縦書き本文を開き、画面端の ▶ から「読み上げ開始」を押してください。"
         } else {
             "アクセシビリティ設定でEbook Auto Readerを有効にしてください。"
         }
     }
 
-    private fun openDmm(headless: Boolean = false) {
+    private fun openDmm() {
         val app = packageManager.getLaunchIntentForPackage(DMM_BOOKS)
         if (app == null) {
             serviceInfo.text = "Google Play版のDMMブックスをインストールしてください。"
             return
         }
-        if (headless) TurnDiagnosticRequest.arm()
         startActivity(app)
-    }
-
-    private fun openFixture(page: String) {
-        startActivity(Intent().setClassName(packageName, "${ReaderActivity::class.java.packageName}.FixtureActivity")
-            .putExtra("page", page))
     }
 
     private fun loadVoices() {
@@ -271,4 +243,11 @@ class ReaderActivity : Activity() {
         task?.invokeOnCompletion { speech.close() } ?: speech.close()
         super.onDestroy()
     }
+}
+
+// Only the permission-protected debug activity can arm this request.
+internal object VoiceDiagnosticRequest {
+    private var pending = false
+    fun arm() { pending = true }
+    fun take(): Boolean = pending.also { pending = false }
 }

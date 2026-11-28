@@ -217,7 +217,7 @@ internal class WindowPages(
     private suspend fun gesture(target: ReaderWindow, moveRight: Boolean) {
         val bounds = target.bounds
         val tap = turn.method == TurnMethod.TAP
-        val y = bounds.exactCenterY()
+        val y = if (tap) bounds.top + bounds.height() * 0.95f else bounds.exactCenterY()
         val left = bounds.left + bounds.width() * if (tap) 100f / 1080f else 0.20f
         val right = bounds.left + bounds.width() * if (tap) 980f / 1080f else 0.80f
         val startOnRight = if (tap) moveRight else !moveRight

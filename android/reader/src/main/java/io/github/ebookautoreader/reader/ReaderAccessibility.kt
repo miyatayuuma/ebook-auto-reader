@@ -19,7 +19,6 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -61,11 +60,10 @@ class ReaderAccessibility : AccessibilityService() {
     private var gestureAllowed = false
     private var testingTurn = false
     private var headlessTest = false
-    private var turnObservation: CompletableDeferred<Unit>? = null
     private var restoring = false
     private var collapseOnPlayback = false
     private var voiceFallback = false
-    private var status = "DMMの本文を表示して取得を確認"
+    private var status = "読み上げ開始を押してください"
     private var lastState: ReaderState? = null
     private var ocrProgress: OcrProgress? = null
     private var synthesis: TtsStage? = null
@@ -73,6 +71,7 @@ class ReaderAccessibility : AccessibilityService() {
     private var lastScreenshot = 0L
     private var operationId = 0
     private var registered = false
+    private var debugRegistered = false
     private var targetMissing = false
 
     private val speechPreferenceChanged = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
@@ -97,6 +96,36 @@ class ReaderAccessibility : AccessibilityService() {
         }
     }
 
+    // Debug only; the sender must hold DUMP (ADB shell or other privileged caller).
+    private val debugCommand = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (!BuildConfig.DEBUG || intent.action != DEBUG_READER_ACTION) return
+            val command = intent.getStringExtra("command")
+            val target = currentWindow()
+            if (target == null || mode != Mode.IDLE) {
+                ReaderDiagnostics.event("diagnostic rejected reason=not_idle_or_no_reader_window")
+                return
+            }
+            when (command) {
+                "capture" -> probe()
+                "turn", "turn-headless" -> {
+                    val methodName = intent.getStringExtra("method") ?: "TAP"
+                    val method = TurnMethod.entries.firstOrNull { it.name == methodName }
+                    if (method == null) {
+                        ReaderDiagnostics.event("diagnostic rejected reason=invalid_method")
+                        return
+                    }
+                    val settings = turnSettings(target).copy(method = method,
+                        delayed = intent.getBooleanExtra("delayed", false))
+                    val headless = command == "turn-headless"
+                    if (headless) detachPanel() else refreshWindow()
+                    runTurnTest(target, headless, settings)
+                }
+                else -> ReaderDiagnostics.event("diagnostic rejected reason=invalid_command")
+            }
+        }
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         if (!registered) {
@@ -106,6 +135,11 @@ class ReaderAccessibility : AccessibilityService() {
                 addAction(Intent.ACTION_USER_PRESENT)
             }, RECEIVER_NOT_EXPORTED)
             registered = true
+        }
+        if (BuildConfig.DEBUG && !debugRegistered) {
+            registerReceiver(debugCommand, IntentFilter(DEBUG_READER_ACTION),
+                "android.permission.DUMP", null, RECEIVER_EXPORTED)
+            debugRegistered = true
         }
         refreshWindow()
     }
@@ -163,10 +197,6 @@ class ReaderAccessibility : AccessibilityService() {
             }
         }
         if (target != null && controls != null) panelWindow = target
-        if (target?.owner == DMM_BOOKS && mode == Mode.IDLE && controls == null && TurnDiagnosticRequest.take()) {
-            runTurnTest(target, headless = true)
-            return
-        }
         if (headlessTest) return
         if (target != null && controls == null) {
             val next = FloatingControls(this, manager, primaryAction = {
@@ -175,7 +205,7 @@ class ReaderAccessibility : AccessibilityService() {
                     Mode.READING -> stop(pause = true)
                     else -> Unit
                 }
-            }, endAction = { stop(pause = false) }, probeAction = ::probe, turnTestAction = ::testTurn,
+            }, endAction = { stop(pause = false) },
                 adjustRate = ::adjustRate, manualTouch = {
                 if (mode == Mode.READING && !gestureAllowed) stop(pause = true)
             })
@@ -211,8 +241,6 @@ class ReaderAccessibility : AccessibilityService() {
             else -> "読み上げ開始"
         }, canAct = mode == Mode.IDLE || mode == Mode.PAUSED || mode == Mode.READING,
             canEnd = mode == Mode.READING || mode == Mode.PAUSED || mode == Mode.PROBE,
-            canProbe = mode == Mode.IDLE || mode == Mode.PAUSED,
-            canTestTurn = mode == Mode.IDLE || turnObservation != null, confirmingTurn = turnObservation != null,
             rate = preferences.speech().rate)
     }
 
@@ -361,7 +389,10 @@ class ReaderAccessibility : AccessibilityService() {
         change(Mode.PROBE, "画面取得を確認中…")
         operate("probe") {
             val outcome = try {
-                pagePort(target).capture().use { "画面取得に成功しました。" }
+                pagePort(target).capture().use {
+                    ReaderDiagnostics.event("diagnostic capture result=ok")
+                    "画面取得に成功しました。"
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -374,18 +405,8 @@ class ReaderAccessibility : AccessibilityService() {
         }
     }
 
-    private fun testTurn() {
-        turnObservation?.let {
-            it.complete(Unit)
-            return
-        }
-        if (mode != Mode.IDLE) return
-        currentWindow()?.let { runTurnTest(it, headless = false) }
-    }
-
-    private fun runTurnTest(target: ReaderWindow, headless: Boolean) {
+    private fun runTurnTest(target: ReaderWindow, headless: Boolean, settings: TurnSettings) {
         val fixture = target.owner != DMM_BOOKS
-        val settings = turnSettings(target)
         probeWindow = target
         testingTurn = true
         headlessTest = headless
@@ -403,30 +424,18 @@ class ReaderAccessibility : AccessibilityService() {
                     mayHaveMoved = false
                     throw ReaderFailure("ページが変わりませんでした。書籍の途中で操作方向を確認してください。", "page_unchanged")
                 }
-                if (!fixture) {
-                    val confirmed = CompletableDeferred<Unit>()
-                    turnObservation = confirmed
-                    headlessTest = false
-                    refreshWindow()
-                    change(Mode.PROBE, "表示が変わりました。次へ1ページ進んだか目視で確認してください。", expand = true)
-                    withTimeoutOrNull(45_000) { confirmed.await() }
-                        ?: throw ReaderFailure("移動方向とページ数を確認できませんでした。", "page_direction_unconfirmed")
-                    turnObservation = null
-                    ReaderDiagnostics.event("page direction source=user delta=1 forward=true")
-                    change(Mode.PROBE, "逆方向に送って元の表示を確認中…")
-                }
+                // Image changes and restoration are measurable; DMM page distance is not.
+                ReaderDiagnostics.event("diagnostic forward changed=true delta="+
+                    if (fixture) "1" else "unverified")
+                change(Mode.PROBE, "逆方向に送って元の表示を確認中…")
                 val returned = finishTestTurn(pages.prepareTurn(forward = false, previous = destination))
                 if (!returned.matches(origin)) {
                     throw ReaderFailure("逆方向の操作で元のページに戻れませんでした。", "page_restore_mismatch")
                 }
                 mayHaveMoved = false
-                if (!headless && !fixture) preferences.confirmTurn(settings)
                 ReaderDiagnostics.event("page turn test result=round_trip_ok method=${settings.method} initialHeadless=$headless")
-                when {
-                    headless -> "パネルなしで1ページ移動し、元に戻りました。通常のパネルからも往復を確認してください。"
-                    fixture -> "自作ページが1ページ進み、元に戻りました。"
-                    else -> "1ページ進み、元のページに戻りました。${settings.method.label}を読み上げに設定しました。"
-                }
+                if (fixture) "自作ページの往復に成功しました。"
+                else "表示の変化と復元を確認しました（移動ページ数は未検証）。"
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -436,12 +445,10 @@ class ReaderAccessibility : AccessibilityService() {
                 probeWindow = null
                 testingTurn = false
                 headlessTest = false
-                turnObservation = null
                 refreshGuard()
             }
-            change(Mode.IDLE, outcome, expand = true)
+            change(Mode.IDLE, outcome)
             refreshWindow()
-            controls?.expand(true)
         }
     }
 
@@ -463,9 +470,6 @@ class ReaderAccessibility : AccessibilityService() {
             return change(Mode.IDLE, "対象の表示が変わりました。読み上げを開始し直してください。", expand = true)
         }
         val settings = turnSettings(target)
-        if (target.owner == DMM_BOOKS && !preferences.verifiedTurn(settings)) {
-            return change(mode, "先に「ページ送り・復元テスト」で移動方向と復元を確認してください。", expand = true)
-        }
         sessionWindow = target
         collapseOnPlayback = true
         change(Mode.READING, "準備中…")
@@ -637,6 +641,7 @@ class ReaderAccessibility : AccessibilityService() {
             preferences.removeObserver(speechPreferenceChanged)
             unregisterReceiver(screenState)
         }
+        if (debugRegistered) unregisterReceiver(debugCommand)
         detachPanel()
         lifetime.invokeOnCompletion { mainExecutor.execute { clearSession() } }
         lifetime.cancel()
@@ -649,14 +654,4 @@ internal object DebugPages {
     var page: Int? = null
 }
 
-internal object TurnDiagnosticRequest {
-    private var deadline = 0L
-
-    fun arm() { deadline = SystemClock.elapsedRealtime() + 20_000 }
-
-    fun take(): Boolean {
-        val requested = deadline > SystemClock.elapsedRealtime()
-        deadline = 0
-        return requested
-    }
-}
+internal const val DEBUG_READER_ACTION = "io.github.ebookautoreader.DEBUG_READER"

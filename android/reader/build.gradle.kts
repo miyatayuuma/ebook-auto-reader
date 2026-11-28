@@ -10,8 +10,8 @@ android {
         applicationId = "io.github.ebookautoreader"
         minSdk = 34
         targetSdk = 35
-        versionCode = 4
-        versionName = "p2.3"
+        versionCode = 5
+        versionName = "p2.4"
         ndk { abiFilters += "arm64-v8a" }
     }
     buildTypes {

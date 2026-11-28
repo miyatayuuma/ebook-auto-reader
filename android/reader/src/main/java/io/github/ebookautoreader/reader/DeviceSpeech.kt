@@ -52,19 +52,9 @@ internal class ReaderPreferences(context: Context) {
     fun removeObserver(listener: android.content.SharedPreferences.OnSharedPreferenceChangeListener) =
         store.unregisterOnSharedPreferenceChangeListener(listener)
 
-    fun turn() = TurnSettings(
-        TurnMethod.entries.firstOrNull { it.name == store.getString("turn_method", null) } ?: TurnMethod.TAP,
-        store.getBoolean("rightward", true), store.getBoolean("turn_delay", false),
-    )
-
+    // Normal reading is fixed to edge taps; ignore legacy diagnostic method/delay preferences.
+    fun turn() = TurnSettings(TurnMethod.TAP, store.getBoolean("rightward", true), false)
     fun saveDirection(rightward: Boolean) { store.edit().putBoolean("rightward", rightward).apply() }
-    fun saveTurnMethod(method: TurnMethod) { store.edit().putString("turn_method", method.name).apply() }
-    fun saveTurnDelay(delayed: Boolean) { store.edit().putBoolean("turn_delay", delayed).apply() }
-
-    fun verifiedTurn(settings: TurnSettings) = store.getString("dmm_turn_verified", null) == settings.key
-    fun confirmTurn(settings: TurnSettings) {
-        store.edit().putString("dmm_turn_verified", settings.key).apply()
-    }
 
     fun bookId() = store.getString("book", "").orEmpty()
     fun saveBookId(id: String) {

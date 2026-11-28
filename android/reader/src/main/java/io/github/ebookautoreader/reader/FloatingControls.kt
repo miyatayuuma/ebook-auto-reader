@@ -26,8 +26,6 @@ internal class FloatingControls(
     private val manager: WindowManager,
     primaryAction: () -> Unit,
     endAction: () -> Unit,
-    probeAction: () -> Unit,
-    turnTestAction: () -> Unit,
     adjustRate: (Int) -> Unit,
     manualTouch: () -> Unit,
 ) {
@@ -65,8 +63,6 @@ internal class FloatingControls(
     }
     private val primary = button(primaryAction)
     private val end = button(endAction)
-    private val probe = button(probeAction)
-    private val turnTest = button(turnTestAction)
     private val slower = button { adjustRate(-1) }.apply {
         text = "−"
         contentDescription = "読み上げ速度を下げる"
@@ -122,8 +118,6 @@ internal class FloatingControls(
         rateControls.addView(speed, LinearLayout.LayoutParams(0, dp(48), 1f))
         rateControls.addView(faster, LinearLayout.LayoutParams(dp(52), dp(48)))
         body.addView(rateControls)
-        body.addView(probe, LinearLayout.LayoutParams(-1, dp(48)))
-        body.addView(turnTest, LinearLayout.LayoutParams(-1, dp(48)))
         panel.setOnApplyWindowInsetsListener { view, received ->
             val safe = received.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
             if (insets != safe) {
@@ -230,13 +224,11 @@ internal class FloatingControls(
 
     fun render(
         message: String, playing: Boolean, action: String, canAct: Boolean, canEnd: Boolean,
-        canProbe: Boolean, canTestTurn: Boolean, confirmingTurn: Boolean, rate: Float,
+        rate: Float,
     ) {
-        val turnLabel = if (confirmingTurn) "次へ1ページ進んだ・復元" else "ページ送り・復元テスト"
         val formatted = String.format(java.util.Locale.JAPAN, "%.2f倍", rate)
         if (status == message && active == playing && primary.text == action && primary.isEnabled == canAct &&
-            end.isEnabled == canEnd && probe.isEnabled == canProbe && turnTest.isEnabled == canTestTurn &&
-            speed.text == formatted && turnTest.text == turnLabel) return
+            end.isEnabled == canEnd && speed.text == formatted) return
         status = message
         active = playing
         label.text = message
@@ -244,12 +236,6 @@ internal class FloatingControls(
         primary.isEnabled = canAct
         end.text = "終了"
         end.isEnabled = canEnd
-        probe.text = "画面取得テスト"
-        probe.isEnabled = canProbe
-        turnTest.text = turnLabel
-        turnTest.isEnabled = canTestTurn
-        probe.visibility = if (canProbe) View.VISIBLE else View.GONE
-        turnTest.visibility = if (canTestTurn) View.VISIBLE else View.GONE
         speed.text = formatted
         slower.isEnabled = rate > MIN_SPEECH_RATE
         faster.isEnabled = rate < MAX_SPEECH_RATE
