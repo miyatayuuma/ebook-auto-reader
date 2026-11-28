@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -50,6 +51,8 @@ class ReaderAccessibility : AccessibilityService() {
     private var ocr: OnDeviceOcr? = null
     private var speech: DeviceSpeech? = null
     private var audio: DeviceAudio? = null
+    private data class WarmEngines(val window: ReaderWindow, val ocr: OnDeviceOcr, val speech: DeviceSpeech, val job: Job)
+    private var warmEngines: WarmEngines? = null
     private var testingTurn = false
     private var voiceFallback = false
     private var status = "読み上げ開始を押してください"
@@ -157,12 +160,16 @@ class ReaderAccessibility : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // Content events only matter for idle discovery of the DMM body view.
+        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
+            (mode != Mode.IDLE || event.packageName?.toString() != DMM_BOOKS)) return
         // Overlay visibility and hit testing generate window events too. Resolve once on the next loop.
         if (!handler.hasCallbacks(refresh)) handler.post(refresh)
     }
 
     override fun onInterrupt() {
         if (mode == Mode.READING || mode == Mode.PROBE) stop(pause = false)
+        else discardWarmEngines()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -213,6 +220,89 @@ class ReaderAccessibility : AccessibilityService() {
         if (lost && (mode == Mode.READING || mode == Mode.PROBE || mode == Mode.PAUSED)) {
             stop(pause = false, sync = false)
         }
+        if (mode == Mode.IDLE) refreshWarmEngines(target)
+    }
+
+    private fun hasBookPage(target: ReaderWindow): Boolean {
+        if (target.owner != DMM_BOOKS) return false
+        val root = windows.firstOrNull { it.id == target.id }?.root ?: return false
+        val pending = ArrayDeque<AccessibilityNodeInfo>().apply { add(root) }
+        repeat(160) {
+            val node = pending.removeFirstOrNull() ?: return false
+            if (!node.isVisibleToUser) return@repeat
+            val bounds = Rect().also(node::getBoundsInScreen)
+            if (node.viewIdResourceName?.substringAfterLast('/') == "bookPageView" &&
+                bounds.width() >= target.bounds.width() / 2 &&
+                bounds.height() >= target.bounds.height() / 2) return true
+            for (index in 0 until node.childCount) node.getChild(index)?.let(pending::addLast)
+        }
+        return false
+    }
+
+    private fun refreshWarmEngines(target: ReaderWindow?) {
+        if (target == null || !hasBookPage(target)) {
+            discardWarmEngines()
+            return
+        }
+        if (warmEngines?.window == target) return
+        discardWarmEngines()
+        if (hasReaderMenu(target)) return
+        val createdOcr = try { newOcr(target) } catch (error: Exception) {
+            logFailure("prewarm", error)
+            return
+        }
+        val createdSpeech = DeviceSpeech(this)
+        val task = scope.launch(start = CoroutineStart.LAZY) {
+            delay(350)
+            // No screen capture, gesture, text recognition or audio output.
+            if (currentWindow() != target || !hasBookPage(target)) return@launch
+            supervisorScope {
+                launch { warmAttempt("ocr") { createdOcr.prewarm() } }
+                launch { warmAttempt("tts") { createdSpeech.prewarm(preferences.speech()) } }
+            }
+        }
+        warmEngines = WarmEngines(target, createdOcr, createdSpeech, task)
+        task.start()
+    }
+
+    private suspend fun warmAttempt(name: String, work: suspend () -> Unit) {
+        try {
+            work()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logFailure("prewarm_$name", error)
+        } catch (error: LinkageError) {
+            ReaderDiagnostics.event("prewarm $name failure=${error.javaClass.simpleName}")
+        } catch (error: OutOfMemoryError) {
+            ReaderDiagnostics.event("prewarm $name failure=OutOfMemoryError")
+        }
+    }
+
+    private fun discardWarmEngines() {
+        val warm = warmEngines ?: return
+        warmEngines = null
+        // The initialization may still be inside JNI. Close only after it returns.
+        warm.job.invokeOnCompletion {
+            mainExecutor.execute {
+                closeEngines(warm.ocr, warm.speech)
+                ReaderDiagnostics.event("prewarm released")
+            }
+        }
+        warm.job.cancel()
+    }
+
+    private suspend fun takeWarmEngines(target: ReaderWindow): WarmEngines? {
+        val warm = warmEngines ?: return null
+        if (warm.window != target) {
+            discardWarmEngines()
+            return null
+        }
+        warm.job.join()
+        if (warmEngines !== warm) return null
+        warmEngines = null
+        ReaderDiagnostics.event("prewarm reused")
+        return warm
     }
 
     internal fun controlCommand(command: ControlCommand) {
@@ -383,6 +473,7 @@ class ReaderAccessibility : AccessibilityService() {
     private fun probe() {
         if (mode != Mode.IDLE && mode != Mode.PAUSED) return
         val target = currentWindow() ?: return change(mode, "DMMの本文ウィンドウを確認できません。", expand = true)
+        discardWarmEngines()
         val returnMode = mode
         probeWindow = target
         change(Mode.PROBE, "画面取得を確認中…")
@@ -536,8 +627,7 @@ class ReaderAccessibility : AccessibilityService() {
         }
     }
 
-    private fun createSession(target: ReaderWindow, settings: TurnSettings): ReaderSession {
-        val pronunciations = preferences.pronunciations(filesDir)
+    private fun newOcr(target: ReaderWindow): OnDeviceOcr {
         val screen = manager.maximumWindowMetrics.bounds
         val bodyTopFraction = if (target.owner == DMM_BOOKS)
             BodyOcrRange.topFraction(screen.top, screen.height(), target.bounds.top, target.bounds.height())
@@ -545,8 +635,14 @@ class ReaderAccessibility : AccessibilityService() {
         // Development-only, local reuse. noBackupFilesDir prevents cloud backup.
         val cache = if (BuildConfig.DEBUG && target.owner == DMM_BOOKS)
             RecognizedPageCache(noBackupFilesDir.resolve(RecognizedPageCache.DIRECTORY_NAME)) else null
-        val createdOcr = OnDeviceOcr(filesDir.resolve("ndl"), bodyTopFraction, cache).also { ocr = it }
-        val createdSpeech = DeviceSpeech(this).also { speech = it }
+        return OnDeviceOcr(filesDir.resolve("ndl"), bodyTopFraction, cache)
+    }
+
+    private suspend fun createSession(target: ReaderWindow, settings: TurnSettings): ReaderSession {
+        val pronunciations = preferences.pronunciations(filesDir)
+        val warm = takeWarmEngines(target)
+        val createdOcr = (warm?.ocr ?: newOcr(target)).also { ocr = it }
+        val createdSpeech = (warm?.speech ?: DeviceSpeech(this)).also { speech = it }
         val audio = DeviceAudio(this, createdSpeech, preferences, reportSynthesis = {
             synthesis = it
             updateReadingStatus()
@@ -660,6 +756,7 @@ class ReaderAccessibility : AccessibilityService() {
     }
 
     private fun clearSession() {
+        discardWarmEngines()
         session = null
         sessionWindow = null
         abortRestore = false
@@ -669,18 +766,22 @@ class ReaderAccessibility : AccessibilityService() {
         ocr = null
         speech = null
         audio = null
-        for (resource in listOfNotNull(closedOcr, closedSpeech)) {
+        closeEngines(closedOcr, closedSpeech)
+        voiceFallback = false
+        lastState = null
+        ocrProgress = null
+        synthesis = null
+        preparingPlayback = false
+    }
+
+    private fun closeEngines(vararg resources: AutoCloseable?) {
+        for (resource in resources.filterNotNull()) {
             try {
                 resource.close()
             } catch (error: Exception) {
                 ReaderDiagnostics.event("close resource=${resource.javaClass.simpleName} result=${error.javaClass.simpleName}")
             }
         }
-        voiceFallback = false
-        lastState = null
-        ocrProgress = null
-        synthesis = null
-        preparingPlayback = false
     }
 
     private fun logFailure(operation: String, error: Exception) {
@@ -699,6 +800,7 @@ class ReaderAccessibility : AccessibilityService() {
         }
         if (debugRegistered) unregisterReceiver(debugCommand)
         ReaderControls.detach(this)
+        discardWarmEngines()
         lifetime.invokeOnCompletion { mainExecutor.execute {
             clearSession()
             pageNumberOcr.values.forEach { it.close() }

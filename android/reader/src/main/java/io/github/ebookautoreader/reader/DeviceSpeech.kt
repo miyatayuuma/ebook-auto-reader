@@ -136,6 +136,20 @@ internal class DeviceSpeech(private val context: Context, private val engine: St
         completed[id]?.complete(result)
     }
 
+    suspend fun prewarm(settings: SpeechSettings) {
+        ReaderDiagnostics.measure("prewarm tts") {
+            val engine = initialize()
+            val eligible = available(engine)
+            val choices = listOfNotNull(eligible.firstOrNull { it.name == settings.voice }) +
+                eligible.filterNot { it.name == settings.voice }
+            // Select an installed offline voice, without synthesizing or playing audio.
+            if (choices.none { engine.setVoice(it) == TextToSpeech.SUCCESS && engine.voice?.name == it.name }) {
+                throw ReaderFailure("日本語オフライン音声を初期化できません。", "tts_prewarm_voice")
+            }
+            Unit
+        }
+    }
+
     suspend fun voices(): List<Voice> = available(initialize())
 
     private fun available(speech: TextToSpeech): List<Voice> =

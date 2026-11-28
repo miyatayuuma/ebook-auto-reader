@@ -86,6 +86,21 @@ internal class OnDeviceOcr(
         return PageCacheKey.hex(digest.digest())
     }
 
+    suspend fun prewarm() {
+        ReaderDiagnostics.measure("prewarm ocr") {
+            runOcrWork(Dispatchers.Default, deadlineMs = 90_000,
+                onTimeout = { ReaderDiagnostics.event("prewarm ocr timeout") },
+                terminate = {}) {
+                nativeOcr.withLock {
+                    if (recognizer == null) openModel()
+                    // Hash model files now so the initial cache lookup also benefits.
+                    modelFingerprint
+                    Unit
+                }
+            }
+        }
+    }
+
     suspend fun read(image: Bitmap, uniformLight: Boolean, report: (OcrProgress?) -> Unit): PageText =
         coroutineScope {
             val updates = MutableStateFlow(OcrProgress(OcrStage.QUEUED))
