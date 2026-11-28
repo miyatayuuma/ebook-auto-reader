@@ -6,7 +6,8 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.*
 import android.content.*
 import android.database.ContentObserver
-import android.graphics.*
+import android.graphics.Path
+import android.graphics.Rect
 import android.media.*
 import android.os.*
 import android.provider.Settings
@@ -66,7 +67,7 @@ class TurnService : AccessibilityService() {
         override fun onChange(selfChange:Boolean){ reconcile() }
     }
     private val screen=object:BroadcastReceiver(){
-        override fun onReceive(context:Context,intent:Intent){ if(intent.action==Intent.ACTION_SCREEN_OFF) halt("screen_off",true) }
+        override fun onReceive(context:Context,intent:Intent){ if(intent.action==Intent.ACTION_SCREEN_OFF && phase!=Phase.IDLE) halt("screen_off",true) }
     }
     private fun windowsHere()=windows.filter { it.displayId==Display.DEFAULT_DISPLAY }
     private fun shade()=windowsHere().any { (it.isFocused||it.isActive) && it.root?.packageName?.toString()=="com.android.systemui" }
@@ -230,7 +231,11 @@ class TurnService : AccessibilityService() {
         if(!accepted){halt("gesture_rejected",true);return}
         h.postDelayed({if(g==generation&&id==gestureId&&phase==Phase.SWIPING)halt("gesture_timeout",true)},2500)
     }
-    override fun onInterrupt(){halt("interrupt",true)}
+    override fun onInterrupt(){
+        // This service produces no spoken feedback to interrupt. Manual
+        // TalkBack interaction must not disarm it; recheck scope instead.
+        if(!h.hasCallbacks(refresh))h.post(refresh)
+    }
     override fun onDestroy(){
         halt("service_destroy",true);h.removeCallbacksAndMessages(null)
         if(registered)runCatching{audio.unregisterAudioPlaybackCallback(callback)}
