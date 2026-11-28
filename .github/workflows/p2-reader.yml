@@ -8,6 +8,8 @@ on:
       - "p2/**"
       - "p1/fixtures.py"
       - ".github/workflows/p2-reader.yml"
+  push:
+    branches: [p25/controls]
   workflow_dispatch:
 
 permissions:
