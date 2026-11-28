@@ -1,0 +1,27 @@
+package io.github.ebookautoreader.lite
+import org.junit.Test
+import org.junit.Assert.*
+class TimingTest {
+    @Test fun readEndAndGapCancellation(){
+        val t=Timing(800,1500);t.reset(0,false)
+        assertEquals(Due.NONE,t.due(1499));assertEquals(Due.NO_SPEECH,t.due(1500))
+        t.audio(1600,true);assertEquals(Due.NONE,t.due(10000))
+        t.audio(10000,false);assertEquals(Due.NONE,t.due(10799))
+        t.audio(10700,true);assertEquals(Due.NONE,t.due(12000))
+        t.audio(12000,false);assertEquals(Due.READ_END,t.due(12800))
+    }
+    @Test fun resetDisarmsOldRead(){
+        val t=Timing(800,1500);t.reset(0,true);t.audio(100,false)
+        t.reset(200,false);assertEquals(Due.NONE,t.due(1000));assertEquals(Due.NO_SPEECH,t.due(1700))
+    }
+    @Test fun imageEvidenceAndTextRejection(){
+        val w=PageAnalysis.W;val h=PageAnalysis.H
+        val a=IntArray(w*h){-1}
+        for(y in 80..280)for(x in 40..200)a[y*w+x]=0xff202020.toInt()
+        val image=PageAnalysis.analyze(a);assertTrue(image.image)
+        for(y in 20..25)for(x in listOf(20,40,60))for(dx in 0..4)a[y*w+x+dx]=0xff000000.toInt()
+        assertFalse(PageAnalysis.analyze(a).image)
+        assertFalse(PageAnalysis.analyze(IntArray(w*h){-1}).image)
+        assertTrue(image.same(image))
+    }
+}
