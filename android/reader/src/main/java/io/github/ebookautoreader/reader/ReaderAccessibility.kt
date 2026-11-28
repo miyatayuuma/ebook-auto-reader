@@ -501,7 +501,11 @@ class ReaderAccessibility : AccessibilityService() {
 
     private fun createSession(target: ReaderWindow, settings: TurnSettings): ReaderSession {
         val pronunciations = preferences.pronunciations(filesDir)
-        val createdOcr = OnDeviceOcr(filesDir.resolve("ndl")).also { ocr = it }
+        val screen = manager.maximumWindowMetrics.bounds
+        val bodyTopFraction = if (target.owner == DMM_BOOKS)
+            BodyOcrRange.topFraction(screen.top, screen.height(), target.bounds.top, target.bounds.height())
+        else 0.0
+        val createdOcr = OnDeviceOcr(filesDir.resolve("ndl"), bodyTopFraction).also { ocr = it }
         val createdSpeech = DeviceSpeech(this).also { speech = it }
         val audio = DeviceAudio(this, createdSpeech, preferences, reportSynthesis = {
             synthesis = it

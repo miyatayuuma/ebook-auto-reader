@@ -45,29 +45,15 @@ internal object ReflowLayout {
             text.length in 1..5 && text.all { it.isDigit() }
     }
 
-    // DMM's observed folio band anchors the running header. Do not crop the image or
-    // infer a header from the vertical position of a heading alone.
-    private fun headerBand(regions: List<Region>, width: Int, height: Int): Boolean =
-        width > 0 && height > 0 && regions.any {
-            (it.type in textTypes || it.type == 8) && !it.vertical && it.box.left >= width * .02 &&
-                it.box.right <= width * .18 && it.box.top >= height * .082 &&
-                it.box.bottom <= height * .11 && it.box.area > 0
-        }
+    private fun headerReason(region: Region, ignored: List<Region>): String? =
+        if (coveredByHeaderOrFooter(region, ignored)) "detected_header_or_footer" else null
 
-    private fun headerReason(region: Region, ignored: List<Region>, band: Boolean, height: Int): String? = when {
-        coveredByHeaderOrFooter(region, ignored) -> "detected_header_or_footer"
-        band && !region.vertical && region.box.top >= height * .082 &&
-            region.box.bottom <= height * .11 -> "folio_anchored_header_band"
-        else -> null
-    }
-
-    fun recognitionCandidates(regions: List<Region>, width: Int = 0, height: Int = 0): Set<Region> {
+    fun recognitionCandidates(regions: List<Region>): Set<Region> {
         val ignored = ignored(regions)
-        val band = headerBand(regions, width, height)
         return regions.filterTo(HashSet()) {
             when (it.type) {
-                10 -> it.detection >= 0.35f && headerReason(it, ignored, band, height) == null
-                in textTypes -> headerReason(it, ignored, band, height) == null
+                10 -> it.detection >= 0.35f && headerReason(it, ignored) == null
+                in textTypes -> headerReason(it, ignored) == null
                 else -> false
             }
         }
@@ -80,8 +66,7 @@ internal object ReflowLayout {
         reportBottomLines: (Int) -> Unit = {},
     ): PageText {
         val ignored = ignored(regions)
-        val band = headerBand(regions, width, height)
-        val rubyCandidates = regions.filter { headerReason(it, ignored, band, height) == null && it.type == 10 && it.detection >= 0.35f &&
+        val rubyCandidates = regions.filter { headerReason(it, ignored) == null && it.type == 10 && it.detection >= 0.35f &&
             it.certainty >= 0.65f && it.complete && it.text.isReading() }
         val lines = mutableListOf<Region>()
         val candidates = regions.filter { it.type in setOf(1, 2, 4, 5, 16) }
@@ -89,7 +74,7 @@ internal object ReflowLayout {
                 .thenByDescending { it.detection })
         for (candidate in candidates) {
             val box = candidate.box
-            if (headerReason(candidate, ignored, band, height) != null || isFolio(candidate, width, height)) continue
+            if (headerReason(candidate, ignored) != null || isFolio(candidate, width, height)) continue
             if (rubyCandidates.any {
                     maxOf(box.area, it.box.area) * 0.85 <= box.intersection(it.box)
                 }) continue
@@ -104,7 +89,7 @@ internal object ReflowLayout {
         // confirmed visual together with successfully recognized captions.
         val ambiguous = regions.filter { it.type in setOf(0, 3, 7, 12, 13, 14) }
             .filter { region ->
-                val header = headerReason(region, ignored, band, height) != null
+                val header = headerReason(region, ignored) != null
                 val duplicate = region.box.area > 0 && visuals.any { visual ->
                     val insideVisual = region.box.intersection(visual.box).toLong() >= region.box.area.toLong() * .85
                     val overlapsCaptions = captions.filter { region.box.intersection(it.box) > 0 }
@@ -116,10 +101,17 @@ internal object ReflowLayout {
                         region.box.area.toLong() <= envelope.area.toLong() * 1.25
                     insideVisual || encloses
                 }
-                !header && !duplicate
+                // A short text-only page may be labeled as a caption by the detector.
+                // Discard an enclosing structure only if a recognized line explains it.
+                val textDuplicate = visuals.isEmpty() && region.box.area > 0 && captions.any { line ->
+                    line.box.area > 0 &&
+                        region.box.intersection(line.box).toLong() >= line.box.area.toLong() * .85 &&
+                        region.box.area.toLong() <= line.box.area.toLong() * 1.25
+                }
+                !header && !duplicate && !textDuplicate
             }
         for (region in regions) {
-            val reason = headerReason(region, ignored, band, height) ?: when {
+            val reason = headerReason(region, ignored) ?: when {
                 region in ambiguous -> "blocking_structure"
                 region in substantive -> "body_or_heading"
                 region in captions -> "recognized_caption"
@@ -144,6 +136,7 @@ internal object ReflowLayout {
             substantive.any { it.type == 1 } -> PageKind.BODY
             substantive.isNotEmpty() -> PageKind.HEADING
             visuals.isNotEmpty() && ambiguous.isEmpty() && failedCaptions == 0 -> PageKind.FIGURE
+            visuals.isEmpty() && captions.isNotEmpty() && ambiguous.isEmpty() && failedCaptions == 0 -> PageKind.HEADING
             uniformLight && regions.isEmpty() -> PageKind.BLANK
             else -> {
                 val reason = when {

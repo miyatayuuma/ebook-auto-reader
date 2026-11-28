@@ -99,24 +99,33 @@ class ReflowLayoutTest {
     }
 
     @Test
-    fun anchoredHeaderBandAppliesBeforeRecognitionAcrossPageKinds() {
-        val folio = Region(Box(20, 84, 80, 108), 1, .9f, "番号")
-        val title = Region(Box(110, 84, 440, 108), 16, .88f, "書名")
-        val body = Region(Box(380, 110, 405, 940), 1, .94f, "本文です。")
-        val ruby = Region(Box(410, 110, 419, 140), 10, .9f, "ほん", .95f)
-        val image = Region(Box(40, 150, 460, 850), 6, .92f)
-        val caption = Region(Box(120, 870, 330, 900), 2, .9f, "図の説明。")
-        val all = listOf(folio, title, body, ruby)
-        val selected = ReflowLayout.recognitionCandidates(all, 500, 1000)
-        assertFalse(folio in selected)
-        assertFalse(title in selected)
-        assertFalse(title in ReflowLayout.recognitionCandidates(listOf(folio.copy(type = 8), title), 500, 1000))
-        assertTrue(body in selected)
-        assertTrue(ruby in selected)
-        assertEquals(listOf("本文です。"), ReflowLayout.read(all, 500, 1000, false).lines.map { it.original })
-        assertEquals(listOf("図の説明。"), ReflowLayout.read(listOf(folio, title, image, caption), 500, 1000, false).lines.map { it.original })
-        val unanchoredHeading = title.copy(box = Box(110, 84, 440, 108), text = "第一章")
-        assertEquals(PageKind.HEADING, ReflowLayout.read(listOf(unanchoredHeading), 500, 1000, false).kind)
+    fun cropUsesDisplayCoordinatesAndRestoresOriginalLineBounds() {
+        val full = BodyOcrRange.topFraction(0, 2424, 0, 2424)
+        assertEquals(267, BodyOcrRange.topPixels(2424, full))
+        val offset = BodyOcrRange.topFraction(0, 2424, 173, 2251)
+        assertEquals(94, BodyOcrRange.topPixels(2251, offset))
+        assertEquals(0.0, BodyOcrRange.topFraction(0, 2424, 300, 2124), 0.0)
+        val box = BodyOcrRange.toOriginal(Box(100, 0, 140, 500), 267)
+        assertEquals(Box(100, 267, 140, 767), box)
+        val body = Region(box, 1, .95f, "短い本文。")
+        val page = ReflowLayout.read(listOf(body), 1080, 2424, false)
+        assertEquals(listOf("短い本文。"), page.lines.map { it.original })
+        assertEquals(LineBounds(100, 267, 140, 767), page.lines.single().bounds)
+    }
+
+    @Test
+    fun shortTextMisclassifiedAsCaptionCanBeReadWithoutVisual() {
+        val line = Region(Box(240, 200, 270, 340), 2, .9f, "短い本文。")
+        val structure = Region(Box(238, 198, 272, 342), 0, .9f)
+        val page = ReflowLayout.read(listOf(line, structure), 500, 1000, false)
+        assertEquals(PageKind.HEADING, page.kind)
+        assertEquals(listOf("短い本文。"), page.lines.map { it.original })
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(line.copy(complete = false), structure), 500, 1000, false)
+        }
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(line, structure, Region(Box(0, 0, 500, 1000), 3, .9f)), 500, 1000, false)
+        }
     }
 
     @Test

@@ -39,7 +39,10 @@ internal data class OcrProgress(
     }
 }
 
-internal class OnDeviceOcr(private val models: File) : AutoCloseable {
+internal class OnDeviceOcr(
+    private val models: File,
+    private val bodyTopFraction: Double = 0.0,
+) : AutoCloseable {
     private companion object {
         // A service restart must also wait for any preceding native work to return.
         val nativeOcr = Mutex()
@@ -53,6 +56,11 @@ internal class OnDeviceOcr(private val models: File) : AutoCloseable {
             val updates = MutableStateFlow(OcrProgress(OcrStage.QUEUED))
             val cancellation = NdlCancellation()
             var timedOut = false
+            val bodyTop = BodyOcrRange.topPixels(image.height, bodyTopFraction)
+            // The caller-thread summary survives even when worker-thread logging is lost.
+            var classification = "not_reached"
+            val regionDetails = mutableListOf<String>()
+            ReaderDiagnostics.event("ocr range build=${BodyOcrRange.BUILD} original=${image.width}x${image.height} top=$bodyTop bottom=${image.height}")
             val observer = launch { updates.collect { if (!timedOut) report(it) } }
             try {
                 runOcrWork(Dispatchers.Default, deadlineMs = 90_000, onTimeout = {
@@ -69,9 +77,22 @@ internal class OnDeviceOcr(private val models: File) : AutoCloseable {
                     }
                 }) {
                     nativeOcr.withLock {
-                        recognize(image, uniformLight, cancellation) { updates.value = it }
+                        val body = if (bodyTop == 0) image else
+                            Bitmap.createBitmap(image, 0, bodyTop, image.width, image.height - bodyTop)
+                        try {
+                            recognize(body, image.height, bodyTop,
+                                uniformLight || (body !== image && isUniformLight(body)), cancellation,
+                                { classification = it }, { regionDetails += it }) { updates.value = it }
+                        } finally {
+                            if (body !== image) body.recycle()
+                        }
                     }
                 }
+            } catch (error: ReaderFailure) {
+                ReaderDiagnostics.event("ocr failure build=${BodyOcrRange.BUILD} reason=${error.reason} classification=$classification regionCount=${regionDetails.size}")
+                // Replay sanitized geometries on the caller thread on failure.
+                regionDetails.take(64).forEach { ReaderDiagnostics.event("ocr failure region $it") }
+                throw error
             } finally {
                 observer.cancel()
                 report(null)
@@ -79,7 +100,9 @@ internal class OnDeviceOcr(private val models: File) : AutoCloseable {
         }
 
     private fun recognize(
-        image: Bitmap, uniformLight: Boolean, cancellation: NdlCancellation, report: (OcrProgress) -> Unit,
+        image: Bitmap, originalHeight: Int, bodyTop: Int, uniformLight: Boolean,
+        cancellation: NdlCancellation, onClassification: (String) -> Unit, onRegion: (String) -> Unit,
+        report: (OcrProgress) -> Unit,
     ): PageText {
         var stage = OcrProgress(OcrStage.MODEL)
         var started = SystemClock.elapsedRealtime()
@@ -106,11 +129,11 @@ internal class OnDeviceOcr(private val models: File) : AutoCloseable {
             val engine = recognizer ?: openModel()
             var bottomDetected = 0
             var bottomSelected = 0
-            fun atBottom(region: Region) = region.box.bottom >= image.height * 0.87
+            fun atBottom(region: Region) = region.box.bottom >= originalHeight * 0.87
             val regions = engine.read(image, ReflowLayout.textTypes, ReflowLayout.structuralTypes,
                 productLayout = true, cancellation = cancellation, selectText = { detected ->
-                    val geometry = detected.associateWith(NdlRegion::toRegion)
-                    val selected = ReflowLayout.recognitionCandidates(geometry.values.toList(), image.width, image.height)
+                    val geometry = detected.associateWith { it.toRegion(bodyTop) }
+                    val selected = ReflowLayout.recognitionCandidates(geometry.values.toList())
                     bottomDetected = geometry.values.count { it.type in ReflowLayout.textTypes && atBottom(it) }
                     bottomSelected = selected.count(::atBottom)
                     geometry.keys.filterTo(HashSet()) { geometry.getValue(it) in selected }
@@ -120,14 +143,14 @@ internal class OnDeviceOcr(private val models: File) : AutoCloseable {
                         progress.skipped, progress.extendedAtBottom))
                 })
             publish(stage.copy(stage = OcrStage.LAYOUT))
-            val recognized = regions.map(NdlRegion::toRegion)
+            val recognized = regions.map { it.toRegion(bodyTop) }
             val bottomRecognized = recognized.count { atBottom(it) && it.complete && it.text.isNotBlank() }
             ReaderDiagnostics.event("ocr bottom detected=$bottomDetected selected=$bottomSelected recognized=$bottomRecognized")
             val typeCounts = recognized.groupingBy { it.type }.eachCount().toSortedMap()
             ReaderDiagnostics.event("ocr regions types=$typeCounts")
-            return ReflowLayout.read(recognized, image.width, image.height, uniformLight,
-                reportClassification = { ReaderDiagnostics.event("ocr classification $it") },
-                reportRegion = { ReaderDiagnostics.event("ocr region $it") }) { bottomRead ->
+            return ReflowLayout.read(recognized, image.width, originalHeight, uniformLight,
+                reportClassification = { onClassification(it); ReaderDiagnostics.event("ocr classification $it") },
+                reportRegion = { onRegion(it); ReaderDiagnostics.event("ocr region $it") }) { bottomRead ->
                 ReaderDiagnostics.event("ocr bottom retained=$bottomRead")
             }
         } catch (error: Throwable) {
@@ -148,6 +171,20 @@ internal class OnDeviceOcr(private val models: File) : AutoCloseable {
         }
     }
 
+    // Blank pages require positive evidence. A crop can remove the only running header;
+    // use an exact scan, never classify an image as blank from sparse sampling.
+    private fun isUniformLight(image: Bitmap): Boolean {
+        val first = image.getPixel(0, 0)
+        if (first ushr 24 != 255 || (first shr 16 and 255) < 210 ||
+            (first shr 8 and 255) < 210 || (first and 255) < 200) return false
+        val row = IntArray(image.width)
+        for (y in 0 until image.height) {
+            image.getPixels(row, 0, image.width, 0, y, image.width, 1)
+            if (row.any { it != first }) return false
+        }
+        return true
+    }
+
     private fun openModel(): NdlRecognizer {
         if (listOf(".p2-verified", "deim.onnx", "parseq.onnx", "charset.json").any { !models.resolve(it).isFile }) {
             throw ReaderFailure("OCRモデルを導入してください。画面取得テストはモデルなしで実行できます。")
@@ -161,5 +198,6 @@ internal class OnDeviceOcr(private val models: File) : AutoCloseable {
     }
 }
 
-private fun NdlRegion.toRegion() = Region(Box(bounds.left, bounds.top, bounds.right, bounds.bottom),
+private fun NdlRegion.toRegion(top: Int) = Region(
+    BodyOcrRange.toOriginal(Box(bounds.left, bounds.top, bounds.right, bounds.bottom), top),
     category, detection, text, certainty, complete)
