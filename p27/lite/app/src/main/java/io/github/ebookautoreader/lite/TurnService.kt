@@ -36,12 +36,10 @@ class TurnService : AccessibilityService() {
     private var prefs:TurnPrefs?=null
     private var timing=Timing(800,1500)
     private var wake:PowerManager.WakeLock?=null
-    private var consecutiveImages=0
     private var turns=0
     private var verifyDeadline=0L
     private var lastVerify:PageFeatures?=null
     private var shadeHold=false
-    private var waitExtra=false
     private var manualSync=false
     private var lastContentProbe=0L
     private var resyncCandidate:PageFeatures?=null
@@ -159,14 +157,14 @@ class TurnService : AccessibilityService() {
         val state=syncAudio()?:return halt("audio_unavailable",true)
         prefs=p; target=t; generation++; phase=Phase.BASELINE; playing=state
         timing=Timing(p.gap,p.noSpeech); timing.reset(now(),state)
-        consecutiveImages=0; turns=0; waitExtra=false; earliestTurn=now()+1500
+        turns=0; earliestTurn=now()+p.noSpeech
         if(p.awake){
             val lock=power.newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK,"EbookAutoTurn:reading").apply { setReferenceCounted(false) }
             if(runCatching { lock.acquire(2*60*60*1000L) }.isFailure){halt("wake_failed",true);return}
             wake=lock; h.postDelayed(renewWake,30*60*1000L)
         }
         showNotification("自動ページ送り動作中")
-        log("start gap=${p.gap} imageWait=${p.noSpeech} audio=$state")
+        log("start gap=${p.gap} noSpeechWait=${p.noSpeech} audio=$state")
         capture { f ->
             baseline=f; phase=Phase.READING
             // Baseline must exist before any timeout can cause a turn.
@@ -213,14 +211,7 @@ class TurnService : AccessibilityService() {
             val fresh=syncAudio()?:return@capture halt("audio_unavailable",true)
             if(fresh!=playing){playing=fresh;timing.audio(now(),fresh)}
             if(playing||timing.due(now())!=due){phase=Phase.READING;schedule();return@capture}
-            if(due==Due.NO_SPEECH){
-                log("image_check positive=${frame.image} large=${frame.largeInk} glyph=${frame.smallInk}")
-                if(!frame.image||prefs?.skip!=true){
-                    if(!waitExtra){waitExtra=true; phase=Phase.READING; h.postDelayed(evaluation,2500);return@capture}
-                    return@capture halt("no_speech_unknown",true)
-                }
-                if(++consecutiveImages>12)return@capture halt("image_limit",true)
-            }else consecutiveImages=0
+            log("turn_due reason=$due")
             turn()
         }
     }
@@ -229,7 +220,7 @@ class TurnService : AccessibilityService() {
         if(!valid())return
         val state=syncAudio()?:return halt("audio_unavailable",true)
         if(state){playing=true;timing.audio(now(),true);phase=Phase.READING;schedule();return}
-        phase=Phase.TURN;timing.reset(now(),false,1200);playing=false;waitExtra=false;earliestTurn=0;manualSync=false
+        phase=Phase.TURN;timing.reset(now(),false,1200);playing=false;earliestTurn=0;manualSync=false
         val p=prefs?:return halt("no_prefs",true)
         val b=t.bounds
         fun x(f:Float)=b.left+b.width()*f
@@ -290,7 +281,6 @@ class TurnService : AccessibilityService() {
         val state=syncAudio()?:return halt("audio_unavailable",true)
         playing=state;timing=Timing(p.gap,p.noSpeech)
         timing.reset(now(),state,1200)
-        waitExtra=false;consecutiveImages=0
         log("manual_page_change resync audio=$state")
         val g=generation;h.postDelayed({verifyManual(g)},260)
     }
