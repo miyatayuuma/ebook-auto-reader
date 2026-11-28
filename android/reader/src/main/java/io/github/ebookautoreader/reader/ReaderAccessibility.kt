@@ -51,7 +51,10 @@ class ReaderAccessibility : AccessibilityService() {
     private var ocr: OnDeviceOcr? = null
     private var speech: DeviceSpeech? = null
     private var audio: DeviceAudio? = null
-    private data class WarmEngines(val window: ReaderWindow, val ocr: OnDeviceOcr, val speech: DeviceSpeech, val job: Job)
+    private data class WarmEngines(
+        val window: ReaderWindow, val ocr: OnDeviceOcr, val speech: DeviceSpeech,
+        val job: Job, val lease: WarmupLease, var attempted: Boolean = false,
+    )
     private var warmEngines: WarmEngines? = null
     private var testingTurn = false
     private var voiceFallback = false
@@ -115,6 +118,7 @@ class ReaderAccessibility : AccessibilityService() {
                 ReaderDiagnostics.event("diagnostic rejected reason=not_idle_or_no_reader_window")
                 return
             }
+            discardWarmEngines()
             when (command) {
                 "capture" -> probe()
                 "page-number" -> {
@@ -244,7 +248,8 @@ class ReaderAccessibility : AccessibilityService() {
             discardWarmEngines()
             return
         }
-        if (warmEngines?.window == target) return
+        val existing = warmEngines
+        if (existing?.window == target && (!existing.job.isCompleted || existing.attempted)) return
         discardWarmEngines()
         if (hasReaderMenu(target)) return
         val createdOcr = try { newOcr(target) } catch (error: Exception) {
@@ -255,13 +260,21 @@ class ReaderAccessibility : AccessibilityService() {
         val task = scope.launch(start = CoroutineStart.LAZY) {
             delay(350)
             // No screen capture, gesture, text recognition or audio output.
-            if (currentWindow() != target || !hasBookPage(target)) return@launch
+            if (currentWindow() != target || !hasBookPage(target) || hasReaderMenu(target)) return@launch
+            val owner = warmEngines?.takeIf { it.ocr === createdOcr } ?: return@launch
+            owner.attempted = true
             supervisorScope {
                 launch { warmAttempt("ocr") { createdOcr.prewarm() } }
                 launch { warmAttempt("tts") { createdSpeech.prewarm(preferences.speech()) } }
             }
         }
-        warmEngines = WarmEngines(target, createdOcr, createdSpeech, task)
+        val lease = WarmupLease(task) {
+            mainExecutor.execute {
+                closeEngines(createdOcr, createdSpeech)
+                ReaderDiagnostics.event("prewarm released")
+            }
+        }
+        warmEngines = WarmEngines(target, createdOcr, createdSpeech, task, lease)
         task.start()
     }
 
@@ -283,13 +296,7 @@ class ReaderAccessibility : AccessibilityService() {
         val warm = warmEngines ?: return
         warmEngines = null
         // The initialization may still be inside JNI. Close only after it returns.
-        warm.job.invokeOnCompletion {
-            mainExecutor.execute {
-                closeEngines(warm.ocr, warm.speech)
-                ReaderDiagnostics.event("prewarm released")
-            }
-        }
-        warm.job.cancel()
+        warm.lease.discard()
     }
 
     private suspend fun takeWarmEngines(target: ReaderWindow): WarmEngines? {
@@ -298,8 +305,7 @@ class ReaderAccessibility : AccessibilityService() {
             discardWarmEngines()
             return null
         }
-        warm.job.join()
-        if (warmEngines !== warm) return null
+        if (!warm.lease.claim()) return null
         warmEngines = null
         ReaderDiagnostics.event("prewarm reused")
         return warm
