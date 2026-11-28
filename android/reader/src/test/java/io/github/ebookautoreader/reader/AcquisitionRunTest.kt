@@ -72,4 +72,77 @@ class AcquisitionRunTest {
         assertEquals(0, pages.turns)
         assertEquals(pages.frames, pages.closed)
     }
+
+    @Test fun localOcrFailureIsDurablyDeferredAndLaterPagesAreSaved() = runTest {
+        val pages = Fake(listOf(1, 2, 3))
+        val snapshots = mutableListOf<AcquisitionProgress>()
+        val result = AcquisitionRun(pages, {
+            if (it.pageNumber == 2) throw ReaderFailure("fixture", "ocr_unclassified_page")
+            key(100 + it.pageNumber!!)
+        }, { null }, { snapshots += it }).run(AcquisitionProgress(1, 3, emptyList()))
+        assertEquals(listOf(1, 2, 3), result.pages.map { it.number })
+        assertEquals(2, result.saved)
+        assertEquals(0, result.remaining)
+        assertFalse(result.complete)
+        assertEquals(listOf(2), result.unresolved.map { it.number })
+        assertEquals("ocr_unclassified_page", snapshots[1].pages.last().failure)
+        assertEquals(2, pages.turns)
+        assertEquals(pages.frames, pages.closed)
+    }
+
+    @Test fun storageErrorAndCheckpointErrorNeverAdvance() = runTest {
+        for (checkpointFails in listOf(false, true)) {
+            val pages = Fake(listOf(1, 2))
+            val error = runCatching {
+                AcquisitionRun(pages, {
+                    if (!checkpointFails) throw ReaderFailure("fixture", "acquire_cache_write")
+                    key(101)
+                }, { null }, { throw ReaderFailure("fixture", "acquire_checkpoint_write") })
+                    .run(AcquisitionProgress(1, 2, emptyList()))
+            }.exceptionOrNull() as ReaderFailure
+            assertEquals(if (checkpointFails) "acquire_checkpoint_write" else "acquire_cache_write", error.reason)
+            assertEquals(0, pages.turns)
+            assertEquals(pages.frames, pages.closed)
+        }
+    }
+
+    @Test fun resumeFromDeferredAnchorAndRetryOnlyRequestedPage() = runTest {
+        val initial = AcquisitionProgress(1, 3, listOf(AcquiredPage(1, key(1), key(101)),
+            AcquiredPage(2, key(2), null, "ocr_incomplete_body")))
+        val scan = Fake(listOf(1, 2, 3), 1)
+        val scanned = AcquisitionRun(scan, { key(103) }, { error("deferred has no cache") },
+            {}).run(initial)
+        assertEquals(2, scanned.saved)
+        val retry = Fake(listOf(1, 2, 3), 1)
+        val finished = AcquisitionRun(retry, { key(102) }, { null }, {}).retry(scanned, 2)
+        assertTrue(finished.complete)
+        assertEquals(listOf(key(101), key(102), key(103)), finished.pages.map { it.cacheKey })
+        assertEquals(0, retry.turns)
+        assertEquals(retry.frames, retry.closed)
+    }
+
+    @Test fun retryWithWrongExactImageCannotReplacePendingPage() = runTest {
+        val initial = AcquisitionProgress(2, 3, listOf(AcquiredPage(2, key(2), null, "ocr_incomplete_body")))
+        val retry = Fake(listOf(2, 3))
+        val error = runCatching {
+            AcquisitionRun(retry, { error("not allowed") }, { null }, { error("not allowed") }).retry(initial, 2)
+        }.exceptionOrNull() as ReaderFailure
+        assertEquals("acquire_anchor_mismatch", error.reason)
+        assertEquals(0, retry.turns)
+        assertEquals(retry.frames, retry.closed)
+    }
+
+    @Test fun legacyJournalMigratesAndV2RoundTripsDeferredPage() {
+        val bytes = java.io.ByteArrayOutputStream()
+        java.io.DataOutputStream(bytes).use {
+            it.writeInt(0x45414331); it.writeInt(1); it.writeInt(3); it.writeInt(1)
+            it.writeInt(1); it.writeUTF(key(1)); it.writeUTF(key(101))
+        }
+        val old = AcquisitionJournalCodec.read(java.io.DataInputStream(bytes.toByteArray().inputStream()))
+        assertEquals(1, old.saved)
+        val next = old.copy(pages = old.pages + AcquiredPage(2, key(2), null, "ocr_unclassified_page"))
+        bytes.reset()
+        java.io.DataOutputStream(bytes).use { AcquisitionJournalCodec.write(it, next) }
+        assertEquals(next, AcquisitionJournalCodec.read(java.io.DataInputStream(bytes.toByteArray().inputStream())))
+    }
 }

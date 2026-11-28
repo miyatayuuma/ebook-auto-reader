@@ -123,8 +123,13 @@ class ReaderAccessibility : AccessibilityService() {
                         val progress = kotlinx.coroutines.withContext(Dispatchers.IO) {
                             AcquisitionJournal(noBackupFilesDir.resolve(AcquisitionJournal.NAME)).load()
                         }
-                        ReaderDiagnostics.event("acquire status saved=${progress?.pages?.size ?: 0}" +
-                            " total=${progress?.total ?: 0} number=${progress?.pages?.lastOrNull()?.number ?: "none"}")
+                        ReaderDiagnostics.event("acquire status saved=${progress?.saved ?: 0}" +
+                            " total=${progress?.total ?: 0} scanned=${progress?.pages?.size ?: 0}" +
+                            " unresolved=${progress?.unresolved?.size ?: 0} remaining=${progress?.remaining ?: 0}" +
+                            " number=${progress?.pages?.lastOrNull()?.number ?: "none"}")
+                        progress?.unresolved?.chunked(50)?.forEach { items ->
+                            ReaderDiagnostics.event("acquire unresolved numbers=${items.joinToString(",") { it.number.toString() }}")
+                        }
                     } catch (_: Exception) {
                         ReaderDiagnostics.event("acquire status result=checkpoint_invalid")
                     }
@@ -143,11 +148,13 @@ class ReaderAccessibility : AccessibilityService() {
             discardWarmEngines()
             when (command) {
                 "capture" -> probe()
-                "acquire" -> {
+                "acquire", "acquire-retry" -> {
+                    val retry = if (command == "acquire-retry") intent.getIntExtra("page", -1) else null
                     val first = intent.getIntExtra("first", 1)
                     val last = intent.getIntExtra("last", 596)
                     val reset = intent.getBooleanExtra("reset", false)
                     val rejection = when {
+                        retry != null && (retry !in 0..9999 || reset) -> "invalid_retry"
                         first !in 0..9999 || last !in first..9999 || last - first + 1 > 1000 -> "invalid_range"
                         target.owner != DMM_BOOKS -> "not_dmm_window"
                         hasReaderMenu(target) -> "page_menu_open"
@@ -162,7 +169,7 @@ class ReaderAccessibility : AccessibilityService() {
                     // confirms stable frames and AcquisitionRun checks the
                     // expected number before OCR or any forward gesture.
                     ReaderDiagnostics.event("acquire start first=$first last=$last bookPageNode=${hasBookPage(target)}")
-                    acquirePages(target, first, last, reset)
+                    acquirePages(target, first, last, reset, retry)
                 }
                 "header" -> diagnoseHeader(target, intent.getStringExtra("expected-title"),
                     intent.getIntExtra("expected-number", -1).takeIf { it >= 0 })
@@ -572,7 +579,7 @@ class ReaderAccessibility : AccessibilityService() {
 
     // Debug-only, bounded, explicitly requested acquisition trial. Use the
     // regular screenshot/OCR path and its fail-closed window/navigation checks.
-    private fun acquirePages(target: ReaderWindow, first: Int, last: Int, reset: Boolean) {
+    private fun acquirePages(target: ReaderWindow, first: Int, last: Int, reset: Boolean, retry: Int? = null) {
         val journal = AcquisitionJournal(noBackupFilesDir.resolve(AcquisitionJournal.NAME))
         val cache = RecognizedPageCache(noBackupFilesDir.resolve(RecognizedPageCache.DIRECTORY_NAME))
         probeWindow = target
@@ -584,21 +591,20 @@ class ReaderAccessibility : AccessibilityService() {
                 val existing = kotlinx.coroutines.withContext(Dispatchers.IO) {
                     if (reset) journal.clear()
                     journal.load()?.also { saved ->
-                        if (saved.first != first || saved.last != last ||
-                            saved.pages.any { cache.get(it.cacheKey) == null }) {
+                        if ((retry == null && (saved.first != first || saved.last != last)) ||
+                            saved.pages.any { item -> item.cacheKey?.let { cache.get(it) == null } == true }) {
                             throw ReaderFailure("取得記録またはキャッシュが一致しません。", "acquire_checkpoint_invalid")
                         }
                     }
                 } ?: AcquisitionProgress(first, last, emptyList())
-                if (existing.pages.size == existing.total) {
-                    ReaderDiagnostics.event("acquire complete saved=${existing.total} total=${existing.total} already=true")
-                    change(Mode.IDLE, "取得済み ${existing.total}/${existing.total}", expand = true)
+                if (retry == null && existing.remaining == 0) {
+                    finishAcquisition(existing)
                     return@operate
                 }
                 val created = newOcr(target)
                 engine = created
                 val pages = pagePort(target, created, turnSettings(target))
-                val result = AcquisitionRun(pages,
+                val runner = AcquisitionRun(pages,
                     persist = { frame ->
                         pages.read(frame)
                         created.persistedKey((frame as ScreenFrame).bitmap)
@@ -607,12 +613,17 @@ class ReaderAccessibility : AccessibilityService() {
                     lookup = { frame -> created.persistedKey((frame as ScreenFrame).bitmap) },
                     checkpoint = { progress ->
                         kotlinx.coroutines.withContext(Dispatchers.IO) { journal.save(progress) }
-                        val item = progress.pages.last()
-                        ReaderDiagnostics.event("acquire saved=${progress.pages.size} total=${progress.total} number=${item.number}")
-                        change(Mode.PROBE, "本文取得 ${progress.pages.size}/${progress.total} · 中止は通知の終了")
-                    }).run(existing)
-                ReaderDiagnostics.event("acquire complete saved=${result.pages.size} total=${result.total}")
-                change(Mode.IDLE, "本文取得完了 ${result.pages.size}/${result.total} · 読書開始ページへ手動で戻ってください。", expand = true)
+                        val item = if (retry == null) progress.pages.last() else
+                            progress.pages.single { it.number == retry }
+                        if (item.failure != null) ReaderDiagnostics.event(
+                            "acquire deferred number=${item.number} reason=${item.failure}")
+                        ReaderDiagnostics.event("acquire saved=${progress.saved} total=${progress.total} number=${item.number}" +
+                            " scanned=${progress.pages.size} unresolved=${progress.unresolved.size}" +
+                            " status=${if (item.failure == null) "saved" else "unresolved"}")
+                        change(Mode.PROBE, "走査 ${progress.pages.size}/${progress.total} · 保存 ${progress.saved} · 要再処理 ${progress.unresolved.size}")
+                    })
+                val result = if (retry == null) runner.run(existing) else runner.retry(existing, retry)
+                finishAcquisition(result)
             } catch (error: CancellationException) {
                 ReaderDiagnostics.event("acquire stopped reason=cancelled")
                 throw error
@@ -627,6 +638,16 @@ class ReaderAccessibility : AccessibilityService() {
                 recordHold(false)
             }
         }
+    }
+
+    private fun finishAcquisition(result: AcquisitionProgress) {
+        val outcome = if (result.complete) "complete" else if (result.remaining == 0) "scan_complete" else "retry_finished"
+        ReaderDiagnostics.event("acquire $outcome saved=${result.saved} total=${result.total}" +
+            " scanned=${result.pages.size} unresolved=${result.unresolved.size} remaining=${result.remaining}")
+        result.unresolved.chunked(50).forEach { items ->
+            ReaderDiagnostics.event("acquire unresolved numbers=${items.joinToString(",") { it.number.toString() }}")
+        }
+        change(Mode.IDLE, "走査 ${result.pages.size}/${result.total} · 保存 ${result.saved} · 要再処理 ${result.unresolved.size}", expand = true)
     }
 
     private fun diagnoseHeader(target: ReaderWindow, expectedTitle: String?, expectedNumber: Int?) {

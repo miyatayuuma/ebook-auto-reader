@@ -85,6 +85,9 @@ internal object ReflowLayout {
         val captions = lines.filter { it.type in setOf(2, 4, 5) && it.complete && hasJapanese(it.text) }
         val visuals = regions.filter { it.type in visualTypes && it.detection >= 0.68f &&
             it.box.area.toLong() >= width.toLong() * height * 0.04 }
+        val figureText = lines.filter { line -> line.box.area > 0 && visuals.any { visual ->
+            line.box.intersection(visual.box).toLong() >= line.box.area.toLong() * .85
+        } }
         // Only dismiss an enclosing structure when its bounds closely match a
         // confirmed visual together with successfully recognized captions.
         val ambiguous = regions.filter { it.type in setOf(0, 3, 7, 12, 13, 14) }
@@ -118,6 +121,7 @@ internal object ReflowLayout {
         for (region in regions) {
             val reason = headerReason(region, ignored) ?: when {
                 region in ambiguous -> "blocking_structure"
+                region in figureText -> if (region.complete && region.text.isNotBlank()) "figure_text_candidate" else "figure_text_unreadable"
                 region in substantive -> "body_or_heading"
                 region in captions -> "recognized_caption"
                 region in rubyCandidates -> "ruby_candidate"
@@ -165,7 +169,10 @@ internal object ReflowLayout {
         return PageText(ordered.map { line ->
             val box = line.box
             SourceLine(line.text, ruby[line].orEmpty(), LineBounds(box.left, box.top, box.right, box.bottom),
-                describeLine(line, substantive, visuals.isNotEmpty()))
+                describeLine(line, substantive, visuals.isNotEmpty()).let {
+                    // Location evidence only; retain text and existing speech order.
+                    if (line in figureText) it.copy(role = LineRole.FIGURE_TEXT) else it
+                })
         }, kind)
     }
 

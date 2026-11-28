@@ -203,6 +203,20 @@ class ReflowLayoutTest {
     }
 
     @Test
+    fun figureTextAndOutsideCaptionHaveDistinctLocationEvidence() {
+        val photo = Region(Box(40, 80, 460, 500), 6, .95f)
+        val label = Region(Box(120, 200, 220, 220), 2, .95f, "写真内の文字")
+        val caption = Region(Box(60, 530, 400, 550), 2, .95f, "写真の説明。")
+        val page = ReflowLayout.read(listOf(photo, label, caption), 500, 700, false)
+        assertEquals(PageKind.FIGURE, page.kind)
+        assertEquals(listOf(label.text, caption.text), page.lines.map { it.original })
+        assertEquals(listOf(LineRole.FIGURE_TEXT, LineRole.CAPTION), page.lines.map { it.layout!!.role })
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(photo, label.copy(complete = false), caption), 500, 700, false)
+        }
+    }
+
+    @Test
     fun enclosingIllustrationAndCaptionNeedsTightExplainedBounds() {
         val image = Region(Box(50, 150, 450, 750), 6, .94f)
         val caption = Region(Box(100, 760, 400, 790), 2, .9f, "図の説明。")
