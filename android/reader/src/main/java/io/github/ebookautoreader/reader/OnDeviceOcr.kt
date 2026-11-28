@@ -110,7 +110,7 @@ internal class OnDeviceOcr(private val models: File) : AutoCloseable {
             val regions = engine.read(image, ReflowLayout.textTypes, ReflowLayout.structuralTypes,
                 productLayout = true, cancellation = cancellation, selectText = { detected ->
                     val geometry = detected.associateWith(NdlRegion::toRegion)
-                    val selected = ReflowLayout.recognitionCandidates(geometry.values.toList())
+                    val selected = ReflowLayout.recognitionCandidates(geometry.values.toList(), image.width, image.height)
                     bottomDetected = geometry.values.count { it.type in ReflowLayout.textTypes && atBottom(it) }
                     bottomSelected = selected.count(::atBottom)
                     geometry.keys.filterTo(HashSet()) { geometry.getValue(it) in selected }
@@ -126,7 +126,8 @@ internal class OnDeviceOcr(private val models: File) : AutoCloseable {
             val typeCounts = recognized.groupingBy { it.type }.eachCount().toSortedMap()
             ReaderDiagnostics.event("ocr regions types=$typeCounts")
             return ReflowLayout.read(recognized, image.width, image.height, uniformLight,
-                reportClassification = { ReaderDiagnostics.event("ocr classification $it") }) { bottomRead ->
+                reportClassification = { ReaderDiagnostics.event("ocr classification $it") },
+                reportRegion = { ReaderDiagnostics.event("ocr region $it") }) { bottomRead ->
                 ReaderDiagnostics.event("ocr bottom retained=$bottomRead")
             }
         } catch (error: Throwable) {

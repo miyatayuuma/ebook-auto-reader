@@ -45,12 +45,29 @@ internal object ReflowLayout {
             text.length in 1..5 && text.all { it.isDigit() }
     }
 
-    fun recognitionCandidates(regions: List<Region>): Set<Region> {
+    // DMM's observed folio band anchors the running header. Do not crop the image or
+    // infer a header from the vertical position of a heading alone.
+    private fun headerBand(regions: List<Region>, width: Int, height: Int): Boolean =
+        width > 0 && height > 0 && regions.any {
+            it.type in textTypes && !it.vertical && it.box.left >= width * .02 &&
+                it.box.right <= width * .18 && it.box.top >= height * .082 &&
+                it.box.bottom <= height * .11 && it.box.area > 0
+        }
+
+    private fun headerReason(region: Region, ignored: List<Region>, band: Boolean, height: Int): String? = when {
+        coveredByHeaderOrFooter(region, ignored) -> "detected_header_or_footer"
+        band && !region.vertical && region.box.top >= height * .082 &&
+            region.box.bottom <= height * .11 -> "folio_anchored_header_band"
+        else -> null
+    }
+
+    fun recognitionCandidates(regions: List<Region>, width: Int = 0, height: Int = 0): Set<Region> {
         val ignored = ignored(regions)
+        val band = headerBand(regions, width, height)
         return regions.filterTo(HashSet()) {
             when (it.type) {
-                10 -> it.detection >= 0.35f
-                in textTypes -> !coveredByHeaderOrFooter(it, ignored)
+                10 -> it.detection >= 0.35f && headerReason(it, ignored, band, height) == null
+                in textTypes -> headerReason(it, ignored, band, height) == null
                 else -> false
             }
         }
@@ -59,19 +76,20 @@ internal object ReflowLayout {
     fun read(
         regions: List<Region>, width: Int, height: Int, uniformLight: Boolean,
         reportClassification: (String) -> Unit = {},
+        reportRegion: (String) -> Unit = {},
         reportBottomLines: (Int) -> Unit = {},
     ): PageText {
-        val rubyCandidates = regions.filter { it.type == 10 && it.detection >= 0.35f &&
-            it.certainty >= 0.65f && it.complete && it.text.isReading() }
         val ignored = ignored(regions)
-
+        val band = headerBand(regions, width, height)
+        val rubyCandidates = regions.filter { headerReason(it, ignored, band, height) == null && it.type == 10 && it.detection >= 0.35f &&
+            it.certainty >= 0.65f && it.complete && it.text.isReading() }
         val lines = mutableListOf<Region>()
         val candidates = regions.filter { it.type in setOf(1, 2, 4, 5, 16) }
             .sortedWith(compareByDescending<Region> { it.complete && it.text.isNotBlank() }
                 .thenByDescending { it.detection })
         for (candidate in candidates) {
             val box = candidate.box
-            if (coveredByHeaderOrFooter(candidate, ignored) || isFolio(candidate, width, height)) continue
+            if (headerReason(candidate, ignored, band, height) != null || isFolio(candidate, width, height)) continue
             if (rubyCandidates.any {
                     maxOf(box.area, it.box.area) * 0.85 <= box.intersection(it.box)
                 }) continue
@@ -87,12 +105,39 @@ internal object ReflowLayout {
         val captions = lines.filter { it.type in setOf(2, 4, 5) && it.complete && hasJapanese(it.text) }
         val visuals = regions.filter { it.type in visualTypes && it.detection >= 0.68f &&
             it.box.area.toLong() >= width.toLong() * height * 0.04 }
-        // Structure detections fully inside a confirmed visual can describe the same illustration.
-        // Anything outside it remains ambiguous and must not be silently skipped.
+        // Only dismiss an enclosing structure when its bounds closely match a
+        // confirmed visual together with successfully recognized captions.
         val ambiguous = regions.filter { it.type in setOf(0, 3, 7, 12, 13, 14) }
-            .filter { region -> region.box.area <= 0 || visuals.none {
-                region.box.intersection(it.box).toLong() >= region.box.area.toLong() * 0.85
-            } }
+            .filter { region ->
+                val header = headerReason(region, ignored, band, height) != null
+                val duplicate = region.box.area > 0 && visuals.any { visual ->
+                    val insideVisual = region.box.intersection(visual.box).toLong() >= region.box.area.toLong() * .85
+                    val overlapsCaptions = captions.filter { region.box.intersection(it.box) > 0 }
+                    val components = listOf(visual) + overlapsCaptions
+                    val envelope = Box(components.minOf { it.box.left }, components.minOf { it.box.top },
+                        components.maxOf { it.box.right }, components.maxOf { it.box.bottom })
+                    val encloses = components.all { it.box.area > 0 &&
+                        region.box.intersection(it.box).toLong() >= it.box.area.toLong() * .85 } &&
+                        region.box.area.toLong() <= envelope.area.toLong() * 1.25
+                    insideVisual || encloses
+                }
+                !header && !duplicate
+            }
+        for (region in regions) {
+            val reason = headerReason(region, ignored, band, height) ?: when {
+                region in ambiguous -> "blocking_structure"
+                region in substantive -> "body_or_heading"
+                region in captions -> "recognized_caption"
+                region in rubyCandidates -> "ruby_candidate"
+                isFolio(region, width, height) -> "numeric_folio"
+                region.type in setOf(0, 3, 7, 12, 13, 14) -> "duplicate_structure"
+                region in visuals -> "confirmed_visual"
+                else -> "other"
+            }
+            val b = region.box
+            reportRegion("type=${region.type} box=${b.left.toDouble()/width},${b.top.toDouble()/height}," +
+                "${b.right.toDouble()/width},${b.bottom.toDouble()/height} confidence=${region.detection} reason=$reason")
+        }
         val failedCaptions = lines.count { it.type in setOf(2, 4, 5) &&
             (!it.complete || it.text.isBlank() || !hasJapanese(it.text)) }
         val kind = when {

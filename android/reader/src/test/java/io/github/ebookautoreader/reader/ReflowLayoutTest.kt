@@ -98,4 +98,42 @@ class ReflowLayoutTest {
         assertThrows(ReaderFailure::class.java) { ReflowLayout.read(emptyList(), 500, 700, false) }
     }
 
+    @Test
+    fun anchoredHeaderBandAppliesBeforeRecognitionAcrossPageKinds() {
+        val folio = Region(Box(20, 84, 80, 108), 1, .9f, "番号")
+        val title = Region(Box(110, 84, 440, 108), 16, .88f, "書名")
+        val body = Region(Box(380, 110, 405, 940), 1, .94f, "本文です。")
+        val ruby = Region(Box(410, 110, 419, 140), 10, .9f, "ほん", .95f)
+        val image = Region(Box(40, 150, 460, 850), 6, .92f)
+        val caption = Region(Box(120, 870, 330, 900), 2, .9f, "図の説明。")
+        val all = listOf(folio, title, body, ruby)
+        val selected = ReflowLayout.recognitionCandidates(all, 500, 1000)
+        assertFalse(folio in selected)
+        assertFalse(title in selected)
+        assertTrue(body in selected)
+        assertTrue(ruby in selected)
+        assertEquals(listOf("本文です。"), ReflowLayout.read(all, 500, 1000, false).lines.map { it.original })
+        assertEquals(listOf("図の説明。"), ReflowLayout.read(listOf(folio, title, image, caption), 500, 1000, false).lines.map { it.original })
+        val unanchoredHeading = title.copy(box = Box(110, 84, 440, 108), text = "第一章")
+        assertEquals(PageKind.HEADING, ReflowLayout.read(listOf(unanchoredHeading), 500, 1000, false).kind)
+    }
+
+    @Test
+    fun enclosingIllustrationAndCaptionNeedsTightExplainedBounds() {
+        val image = Region(Box(50, 150, 450, 750), 6, .94f)
+        val caption = Region(Box(100, 760, 400, 790), 2, .9f, "図の説明。")
+        val enclosing = Region(Box(48, 148, 452, 792), 0, .8f)
+        val events = mutableListOf<String>()
+        val page = ReflowLayout.read(listOf(image, caption, enclosing), 500, 1000, false,
+            reportRegion = events::add)
+        assertEquals(PageKind.FIGURE, page.kind)
+        assertEquals(listOf("図の説明。"), page.lines.map { it.original })
+        assertTrue(events.any { it.contains("type=0") && it.contains("reason=duplicate_structure") })
+        val unknown = Region(Box(0, 0, 500, 1000), 3, .9f)
+        assertThrows(ReaderFailure::class.java) { ReflowLayout.read(listOf(image, caption, unknown), 500, 1000, false) }
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(image, caption.copy(text = "", complete = false), enclosing), 500, 1000, false)
+        }
+    }
+
 }
