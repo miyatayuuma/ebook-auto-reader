@@ -82,7 +82,17 @@ internal class PageNumberOcr(model: PageNumberModel) : AutoCloseable {
             val boxes = if (number != null && PageNumberParser.parse(label) == number &&
                 label.length == number.toString().length && leading.all { it.boundingBox != null }) {
                 leading.map { Rect(it.boundingBox!!) }
-            } else null
+            } else {
+                // Some recognizers return an element box but no per-symbol boxes.
+                // Use it only for an element consisting entirely of the page digits.
+                val element = first?.elements?.firstOrNull()
+                val value = element?.text ?: ""
+                if (number != null && value.length == number.toString().length &&
+                    value.all { it in '0'..'9' || it in '０'..'９' } &&
+                    PageNumberParser.parse(value) == number && element?.boundingBox != null) {
+                    List(value.length) { Rect(element.boundingBox!!) }
+                } else null
+            }
             PageNumberResult(number, boxes)
         } finally {
             if (crop !== bitmap) crop.recycle()

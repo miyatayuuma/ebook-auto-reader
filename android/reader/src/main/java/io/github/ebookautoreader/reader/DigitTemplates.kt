@@ -125,8 +125,9 @@ internal class TemplatePageNumberOcr {
     private val templates = DigitTemplates()
     private var conditions: String? = null
     private var resetReason = "new_session"
+    private var lastBackground: Int? = null
     val learned: Int get() = templates.learned
-    fun reset(reason: String) { templates.clear(); conditions = null; resetReason = reason }
+    fun reset(reason: String) { templates.clear(); conditions = null; lastBackground = null; resetReason = reason }
     fun takeResetReason(): String = resetReason.also { resetReason = "none" }
 
     fun analyze(bitmap: Bitmap, window: Rect, screen: Rect, windowId: Int): Pair<DigitSegments?, DigitMatch> {
@@ -136,6 +137,19 @@ internal class TemplatePageNumberOcr {
             conditions = signature
         }
         val crop = PageHeaderCrop.crop(bitmap, window, screen) ?: return null to DigitMatch(null, null, null, "crop")
+        val colors = IntArray(crop.width * crop.height)
+        crop.getPixels(colors, 0, crop.width, 0, 0, crop.width, crop.height)
+        val histogram = IntArray(256)
+        for (color in colors) {
+            val gray = ((color shr 16 and 255) * 54 + (color shr 8 and 255) * 183 + (color and 255) * 19) shr 8
+            histogram[gray]++
+        }
+        val background = histogram.indices.maxByOrNull { histogram[it] } ?: 0
+        if (lastBackground?.let { abs(it - background) > 40 } == true) {
+            templates.clear()
+            resetReason = "background_changed"
+        }
+        lastBackground = background
         val segments = try { DigitSegmentation.fromBitmap(crop) } finally { if (crop !== bitmap) crop.recycle() }
         return segments to if (segments == null) DigitMatch(null, null, null, "segmentation") else templates.match(segments.glyphs)
     }
