@@ -478,13 +478,14 @@ class ReaderAccessibility : AccessibilityService() {
             return change(Mode.IDLE, "対象の表示が変わりました。読み上げを開始し直してください。", expand = true)
         }
         val settings = turnSettings(target)
+        val startedAt = SystemClock.elapsedRealtime()
         sessionWindow = target
         change(Mode.READING, "準備中…")
         operate("read") {
             try {
                 val current = session ?: createSession(target, settings).also { session = it }
                 audio?.startOutput()
-                current.run()
+                current.run(startedAt)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -514,7 +515,7 @@ class ReaderAccessibility : AccessibilityService() {
         }
         this.audio = audio
         return ReaderSession(pagePort(target, createdOcr, settings), audio, pronunciations, ::onState,
-            startupBufferMs = 8_000, clock = SystemClock::elapsedRealtime, log = ReaderDiagnostics::event)
+            clock = SystemClock::elapsedRealtime, log = ReaderDiagnostics::event)
     }
 
     private fun onState(state: ReaderState) {

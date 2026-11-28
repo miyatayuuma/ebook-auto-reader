@@ -13,6 +13,21 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class ReaderSessionTest {
     @Test
+    fun firstClipStartsWithoutWaitingForNextPageOrBuffer() = runTest {
+        val pages = FakePages(listOf(body("最初です。"), body("続きです。"))).apply { readDelay = 1_000 }
+        val audio = FakeAudio()
+        val logs = mutableListOf<String>()
+        val session = ReaderSession(pages, audio, Pronunciations(), {},
+            clock = { testScheduler.currentTime }, log = logs::add)
+        val work = async { session.run() }
+        advanceTimeBy(1_200)
+        assertEquals(listOf(0), pages.decoded)
+        assertEquals(listOf("最初です。"), audio.starts)
+        assertTrue(logs.any { it.startsWith("startup playback ") })
+        work.cancelAndJoin()
+    }
+
+    @Test
     fun figureContinuesPrefetchToFollowingBody() = runTest {
         val pages = FakePages(listOf(body("最初です。"), PageText(emptyList(), PageKind.FIGURE), body("続きです。")))
         val audio = FakeAudio()
@@ -178,12 +193,12 @@ class ReaderSessionTest {
     }
 
     @Test
-    fun shortPagesPrebufferDuringPreparationAndRestoreFourKnownPages() = runTest {
+    fun shortPagesPrefetchDuringPlaybackAndRestoreFourKnownPages() = runTest {
         val source = (0..8).map { body("短い文${it}です。") }
         val pages = FakePages(source)
         val audio = FakeAudio()
         val states = mutableListOf<ReaderState>()
-        val session = ReaderSession(pages, audio, Pronunciations(), states::add, startupBufferMs = 4_000)
+        val session = ReaderSession(pages, audio, Pronunciations(), states::add)
         val first = async { session.run() }
         advanceTimeBy(350)
         assertTrue(pages.decoded.size >= 3)
