@@ -40,11 +40,11 @@ internal enum class PageNumberModel(val argument: String) {
 }
 
 internal object PageNumberBounds {
-    fun inBitmap(width: Int, height: Int, window: Rect, screen: Rect): Rect? {
+    fun inBitmap(width: Int, height: Int, window: Rect, screen: Rect, wide: Boolean = false): Rect? {
         if (window.isEmpty || screen.isEmpty) return null
         val header = Rect(screen.left + floor(screen.width() * .02).toInt(),
             screen.top + floor(screen.height() * .082).toInt(),
-            screen.left + ceil(screen.width() * .18).toInt(),
+            screen.left + ceil(screen.width() * (if (wide) .98 else .18)).toInt(),
             screen.top + ceil(screen.height() * .11).toInt())
         if (!window.contains(header)) return null
         val result = Rect(floor((header.left - window.left).toDouble() * width / window.width()).toInt(),
@@ -61,8 +61,15 @@ internal class PageNumberOcr(model: PageNumberModel) : AutoCloseable {
         PageNumberModel.LATIN -> TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     }
 
-    suspend fun read(bitmap: Bitmap, window: Rect, screen: Rect): Int? = withContext(Dispatchers.IO) {
-        val header = PageNumberBounds.inBitmap(bitmap.width, bitmap.height, window, screen) ?: return@withContext null
+    suspend fun read(bitmap: Bitmap, window: Rect, screen: Rect): Int? =
+        readLines(bitmap, window, screen, false)?.firstOrNull()?.let(PageNumberParser::parse)
+
+    // Experimental: the title is an observation, never a unique book identifier.
+    suspend fun readHeader(bitmap: Bitmap, window: Rect, screen: Rect): HeaderObservation? =
+        readLines(bitmap, window, screen, true)?.let(HeaderParser::parse)
+
+    private suspend fun readLines(bitmap: Bitmap, window: Rect, screen: Rect, wide: Boolean): List<String>? = withContext(Dispatchers.IO) {
+        val header = PageNumberBounds.inBitmap(bitmap.width, bitmap.height, window, screen, wide) ?: return@withContext null
         val x1 = header.left
         val y1 = header.top
         val x2 = header.right
@@ -75,9 +82,9 @@ internal class PageNumberOcr(model: PageNumberModel) : AutoCloseable {
                     try {
                         if (continuation.isActive) {
                             if (task.isSuccessful) {
-                                val first = task.result.textBlocks.flatMap { it.lines }.filter { it.boundingBox != null }
-                                    .minWithOrNull(compareBy({ it.boundingBox!!.left }, { it.boundingBox!!.top }))
-                                continuation.resume(first?.let { PageNumberParser.parse(it.text) })
+                                val lines = task.result.textBlocks.flatMap { it.lines }.filter { it.boundingBox != null }
+                                    .sortedWith(compareBy({ it.boundingBox!!.left }, { it.boundingBox!!.top }))
+                                continuation.resume(lines.map { it.text })
                             } else {
                                 continuation.resumeWithException(task.exception ?: IllegalStateException("page number recognition failed"))
                             }

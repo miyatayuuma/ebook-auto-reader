@@ -123,6 +123,8 @@ class ReaderAccessibility : AccessibilityService() {
             discardWarmEngines()
             when (command) {
                 "capture" -> probe()
+                "header" -> diagnoseHeader(target, intent.getStringExtra("expected-title"),
+                    intent.getIntExtra("expected-number", -1).takeIf { it >= 0 })
                 "page-number" -> {
                     val models = PageNumberModel.selection(intent.getStringExtra("model"))
                     if (models == null) ReaderDiagnostics.event("page_number result=error reason=invalid_model")
@@ -522,6 +524,41 @@ class ReaderAccessibility : AccessibilityService() {
                 probeWindow = null
             }
             change(returnMode, outcome, expand = true)
+        }
+    }
+
+    private fun diagnoseHeader(target: ReaderWindow, expectedTitle: String?, expectedNumber: Int?) {
+        probeWindow = target
+        change(Mode.PROBE, "ヘッダーを認識中…")
+        operate("header") {
+            try {
+                val frame = windowPages(target).captureForPageNumber()
+                frame.use {
+                    val engine = pageNumberOcr.getOrPut(PageNumberModel.JAPANESE) { PageNumberOcr(PageNumberModel.JAPANESE) }
+                    val screen = manager.maximumWindowMetrics.bounds
+                    val narrowStart = SystemClock.elapsedRealtime()
+                    val number = engine.read(it.bitmap, target.bounds, screen)
+                    val narrowMs = SystemClock.elapsedRealtime() - narrowStart
+                    val wideStart = SystemClock.elapsedRealtime()
+                    val header = engine.readHeader(it.bitmap, target.bounds, screen)
+                    val wideMs = SystemClock.elapsedRealtime() - wideStart
+                    val title = header?.titleCandidate
+                    val titleMatch = if (expectedTitle == null || title == null) null
+                        else HeaderParser.normalizedTitle(expectedTitle) == HeaderParser.normalizedTitle(title)
+                    val numberMatch = expectedNumber?.let { it == header?.number }
+                    ReaderDiagnostics.event("header result=ok narrowMs=$narrowMs wideMs=$wideMs" +
+                        " narrowNumber=${number ?: "unknown"} wideNumber=${header?.number ?: "unknown"}" +
+                        " numberAgreement=${number != null && number == header?.number}" +
+                        " expectedNumberMatch=$numberMatch titlePresent=${title != null} titleMatch=$titleMatch")
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                ReaderDiagnostics.event("header result=error")
+            } finally {
+                probeWindow = null
+                change(Mode.IDLE, "ヘッダー診断を終了しました。")
+            }
         }
     }
 
