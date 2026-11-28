@@ -123,7 +123,10 @@ internal class OnDeviceOcr(private val models: File) : AutoCloseable {
             val recognized = regions.map(NdlRegion::toRegion)
             val bottomRecognized = recognized.count { atBottom(it) && it.complete && it.text.isNotBlank() }
             ReaderDiagnostics.event("ocr bottom detected=$bottomDetected selected=$bottomSelected recognized=$bottomRecognized")
-            return ReflowLayout.read(recognized, image.width, image.height, uniformLight) { bottomRead ->
+            val typeCounts = recognized.groupingBy { it.type }.eachCount().toSortedMap()
+            ReaderDiagnostics.event("ocr regions types=$typeCounts")
+            return ReflowLayout.read(recognized, image.width, image.height, uniformLight,
+                reportClassification = { ReaderDiagnostics.event("ocr classification $it") }) { bottomRead ->
                 ReaderDiagnostics.event("ocr bottom retained=$bottomRead")
             }
         } catch (error: Throwable) {
