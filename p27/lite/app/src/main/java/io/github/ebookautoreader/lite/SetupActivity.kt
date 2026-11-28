@@ -17,7 +17,7 @@ internal data class TurnPrefs(val gap: Long, val noSpeech: Long, val left: Boole
         fun read(c: Context): TurnPrefs {
             val p = c.getSharedPreferences("turn", Context.MODE_PRIVATE)
             return TurnPrefs(p.getLong("gap",800).coerceIn(500,4000), p.getLong("noSpeech",1500).coerceIn(1000,8000),
-                p.getBoolean("left",true), p.getBoolean("twoFinger",false), p.getBoolean("skip",true),
+                p.getBoolean("swipeRightV2",true), true, p.getBoolean("skip",true),
                 p.getBoolean("awake",true), p.getBoolean("enabled",true))
         }
     }
@@ -39,15 +39,15 @@ class SetupActivity : Activity() {
         val enabled=check("TalkBackと自動連動",p.enabled)
         val gap=number("読了判定 ms (500–4000)",p.gap)
         val wait=number("画像判定開始 ms (1000–8000)",p.noSpeech)
-        val left=check("左下を次ページ方向とする（縦書き）",p.left)
-        val two=check("2本指スワイプを使う（タップ不成立時の代替）",p.twoFinger)
+        val left=check("右向きスワイプ（左→右）で次ページへ。逆ならOFF",p.left)
+        label("ページ送り：2本指スワイプ固定（タップは不発のため廃止）")
         val skip=check("画像と強く判定できる無音ページを送る",p.skip)
         val awake=check("読書中の画面点灯維持",p.awake)
         button("設定を保存") {
             val g=gap.text.toString().toLongOrNull(); val w=wait.text.toString().toLongOrNull()
             if(g==null || g !in 500L..4000L || w==null || w !in 1000L..8000L) { Toast.makeText(this,"数値範囲を確認",Toast.LENGTH_SHORT).show(); return@button }
             getSharedPreferences("turn",MODE_PRIVATE).edit().putLong("gap",g).putLong("noSpeech",w)
-                .putBoolean("left",left.isChecked).putBoolean("twoFinger",two.isChecked).putBoolean("skip",skip.isChecked)
+                .putBoolean("swipeRightV2",left.isChecked).putBoolean("skip",skip.isChecked)
                 .putBoolean("awake",awake.isChecked).putBoolean("enabled",enabled.isChecked).apply()
             Toast.makeText(this,"保存済み。次回TalkBack ONから適用",Toast.LENGTH_SHORT).show()
         }
