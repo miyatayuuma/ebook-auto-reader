@@ -41,7 +41,7 @@ internal class WindowPages(
     // A single screenshot for the debug page-number measurement.
     suspend fun captureForPageNumber(): ScreenFrame {
         val target = resolve() ?: throw ReaderFailure("DMMの本文ページを表示してください。", "window_changed")
-        return captureOnce(target)
+        return captureOnce(target, recognizeNumber = false)
     }
 
     override suspend fun capture(): PageFrame {
@@ -144,7 +144,7 @@ internal class WindowPages(
 
     override suspend fun read(frame: PageFrame): PageText = readPage(frame as ScreenFrame)
 
-    private suspend fun captureOnce(target: ReaderWindow): ScreenFrame =
+    private suspend fun captureOnce(target: ReaderWindow, recognizeNumber: Boolean = true): ScreenFrame =
         ReaderDiagnostics.measure("capture") {
             screenshotSlot()
             checkWindow(target)
@@ -159,7 +159,7 @@ internal class WindowPages(
                 val frame = withContext(Dispatchers.Default) { fingerprint(captured) }
                 checkWindow(target)
                 if (menuControlsVisible()) throw menuFailure()
-                frame.pageNumber = try { pageNumber(frame, target) } catch (error: kotlinx.coroutines.CancellationException) {
+                frame.pageNumber = if (!recognizeNumber) null else try { pageNumber(frame, target) } catch (error: kotlinx.coroutines.CancellationException) {
                     throw error
                 } catch (_: Exception) { null }
                 ReaderDiagnostics.event("page_number navigation number=${frame.pageNumber ?: "unknown"}")
