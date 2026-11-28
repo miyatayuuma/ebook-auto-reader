@@ -28,6 +28,7 @@ internal class ScreenFrame(val bitmap: Bitmap, override val signature: PageSigna
 internal class WindowPages(
     private val service: AccessibilityService,
     private val resolve: () -> ReaderWindow?,
+    private val awaitTarget: suspend (ReaderWindow) -> Unit,
     private val withoutOverlays: suspend (Boolean, suspend () -> PageFrame) -> PageFrame,
     private val menuControlsVisible: () -> Boolean,
     private val screenshotSlot: suspend () -> Unit,
@@ -76,6 +77,7 @@ internal class WindowPages(
                     }
                     if (menuControlsVisible()) throw menuFailure()
                     val before = fixturePosition(target)
+                    checkWindow(target)
                     if (turn.method == TurnMethod.NODE) pageAction(target, right) else gesture(target, right)
                     val frame = ReaderDiagnostics.measure("page settle") { awaitPage(target, previous) }
                     val after = fixturePosition(target)
@@ -147,7 +149,8 @@ internal class WindowPages(
     private fun menuFailure() =
         ReaderFailure("本文の上にメニューが表示されています。メニューを閉じてから再開してください。", "page_menu_open")
 
-    private fun checkWindow(expected: ReaderWindow) {
+    private suspend fun checkWindow(expected: ReaderWindow) {
+        awaitTarget(expected)
         if (resolve() != expected) throw ReaderFailure("対象のウィンドウが変わりました。", "window_changed")
     }
 
