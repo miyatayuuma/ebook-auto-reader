@@ -22,6 +22,22 @@ internal data class ReaderWindow(val id: Int, val owner: String, val bounds: Rec
 
 internal class ScreenFrame(val bitmap: Bitmap, override val signature: PageSignature, val uniformLight: Boolean, override val headerSignature: PageSignature, override var pageNumber: Int? = null) :
     PageFrame {
+    override suspend fun exactKey(): String = withContext(Dispatchers.Default) {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val dimensions = java.nio.ByteBuffer.allocate(8).putInt(bitmap.width).putInt(bitmap.height)
+        digest.update(dimensions.array())
+        val row = IntArray(bitmap.width)
+        val bytes = java.nio.ByteBuffer.allocate(bitmap.width * 4)
+        val ints = bytes.asIntBuffer()
+        for (y in 0 until bitmap.height) {
+            bitmap.getPixels(row, 0, bitmap.width, 0, y, bitmap.width, 1)
+            ints.clear()
+            ints.put(row)
+            digest.update(bytes.array())
+        }
+        PageCacheKey.hex(digest.digest())
+    }
+
     override fun close() = bitmap.recycle()
 }
 

@@ -15,6 +15,9 @@ internal interface PageFrame : Closeable {
     val signature: PageSignature
     val pageNumber: Int? get() = null
     val headerSignature: PageSignature? get() = null
+    // Optional exact identity; approximate navigation signatures are not enough
+    // to reuse a prepared body or speech.
+    suspend fun exactKey(): String? = null
 }
 internal interface ReaderPages {
     suspend fun capture(): PageFrame
@@ -56,7 +59,13 @@ internal class ReaderSession(
     private val log: (String) -> Unit = {},
     // A session keeps its selected policy across pause/resume.
     internal val readingMode: ReadingMode = ReadingMode.DEFAULT,
+    private var preparedStart: PreparedStart? = null,
 ) {
+    fun discardPreparedStart() {
+        preparedStart?.close()
+        preparedStart = null
+    }
+
     private companion object {
         const val AHEAD_PAGES = 4
         // One image undergoing OCR plus two queued images. Navigation's
@@ -136,6 +145,7 @@ internal class ReaderSession(
                 consume()
             }
         } finally {
+            discardPreparedStart()
             // Structured cancellation has joined both workers, including any dispatched turn.
             // Keep the source units for replay, and release every prepared player and WAV.
             frames.forEach { it.frame.close() }
@@ -453,11 +463,36 @@ internal class ReaderSession(
         if (cursor == null) {
             update(state.copy(stage = ReaderStage.CAPTURE))
             val frame = pages.capture()
-            milestone("capture")
-            register(KnownPage(0, frame.signature, frame.pageNumber, frame.headerSignature))
-            frames.addLast(CapturedPage(0, frame))
-            captured = 0
-            update(state)
+            var retained = false
+            try {
+                milestone("capture")
+                val prepared = preparedStart
+                val reuse = prepared != null && prepared.matches(frame)
+                register(KnownPage(0, frame.signature, frame.pageNumber, frame.headerSignature))
+                captured = 0
+                if (reuse && prepared != null) {
+                    acceptPage(prepared.page, 0)
+                    if (prepared.hasClip) {
+                        sentences.poll()?.let { unit ->
+                            val clip = prepared.takeClip(unit)
+                            pending.addLast(Pending(unit, clip))
+                            if (clip != null) {
+                                milestone("synthesis")
+                                update(state.copy(synthesized = unit.end))
+                            }
+                        }
+                    }
+                    log("startup prepared result=hit audio=${pending.firstOrNull()?.clip != null}")
+                } else {
+                    if (prepared != null) log("startup prepared result=miss")
+                    frames.addLast(CapturedPage(0, frame))
+                    retained = true
+                }
+                update(state)
+            } finally {
+                if (!retained) frame.close()
+                discardPreparedStart()
+            }
         } else {
             update(state.copy(stage = ReaderStage.CAPTURE))
             checkedCapture(requireNotNull(cursor)).close()
@@ -486,6 +521,10 @@ internal class ReaderSession(
     private suspend fun decode(frame: PageFrame, index: Int) {
         if (state.playing == null) update(state.copy(stage = ReaderStage.OCR))
         val page = pages.read(frame)
+        acceptPage(page, index)
+    }
+
+    private fun acceptPage(page: PageText, index: Int) {
         milestone("ocr")
         if (page.kind in listOf(PageKind.BODY, PageKind.HEADING) && page.lines.none { it.original.isNotBlank() }) {
             throw ReaderFailure("本文を確認できません。")

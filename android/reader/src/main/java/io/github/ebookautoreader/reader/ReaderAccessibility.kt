@@ -54,6 +54,8 @@ class ReaderAccessibility : AccessibilityService() {
     private data class WarmEngines(
         val window: ReaderWindow, val ocr: OnDeviceOcr, val speech: DeviceSpeech,
         val job: Job, val lease: WarmupLease, var attempted: Boolean = false,
+        var prepared: PreparedStart? = null,
+        var preparedVoice: SpeechSettings? = null,
     )
     private var warmEngines: WarmEngines? = null
     private var testingTurn = false
@@ -257,9 +259,10 @@ class ReaderAccessibility : AccessibilityService() {
             return
         }
         val createdSpeech = DeviceSpeech(this)
+        lateinit var bundle: WarmEngines
         val task = scope.launch(start = CoroutineStart.LAZY) {
             delay(350)
-            // No screen capture, gesture, text recognition or audio output.
+            // No automatic page input or audio output before explicit start.
             if (currentWindow() != target || !hasBookPage(target) || hasReaderMenu(target)) return@launch
             val owner = warmEngines?.takeIf { it.ocr === createdOcr } ?: return@launch
             owner.attempted = true
@@ -267,14 +270,35 @@ class ReaderAccessibility : AccessibilityService() {
                 launch { warmAttempt("ocr") { createdOcr.prewarm() } }
                 launch { warmAttempt("tts") { createdSpeech.prewarm(preferences.speech()) } }
             }
+            // One current-page preparation per reader-window entry, not a
+            // continuous background OCR of every manually visited page.
+            if (currentWindow() != target || !hasBookPage(target) || hasReaderMenu(target)) return@launch
+            warmAttempt("page") {
+                val voice = preferences.speech()
+                val pronunciations = preferences.pronunciations(filesDir)
+                val preparationAudio = DeviceAudio(this@ReaderAccessibility, createdSpeech, preferences,
+                    reportSynthesis = {}, reportPlayback = {}, fallback = {})
+                // Read and synthesize only a complete unit from this page.
+                val prepared = ReaderDiagnostics.measure("prewarm page") {
+                    PreparedStart.prepare(pagePort(target, createdOcr), preparationAudio, pronunciations,
+                        ReaderDiagnostics::event)
+                }
+                // No suspension between ownership transfer and cleanup registration.
+                owner.prepared = prepared
+                owner.preparedVoice = voice
+                ReaderDiagnostics.event("prewarm page ready=${prepared != null} audio=${prepared?.hasClip == true}")
+            }
         }
         val lease = WarmupLease(task) {
             mainExecutor.execute {
+                bundle.prepared?.close()
+                bundle.prepared = null
                 closeEngines(createdOcr, createdSpeech)
                 ReaderDiagnostics.event("prewarm released")
             }
         }
-        warmEngines = WarmEngines(target, createdOcr, createdSpeech, task, lease)
+        bundle = WarmEngines(target, createdOcr, createdSpeech, task, lease)
+        warmEngines = bundle
         task.start()
     }
 
@@ -660,9 +684,17 @@ class ReaderAccessibility : AccessibilityService() {
             updateReadingStatus()
         }
         this.audio = audio
-        return ReaderSession(pagePort(target, createdOcr, settings), audio, pronunciations, ::onState,
+        val prepared = warm?.prepared
+        val preparedVoice = warm?.preparedVoice
+        val voice = preferences.speech()
+        if (preparedVoice == null || preparedVoice.voice != voice.voice || preparedVoice.pitch != voice.pitch) {
+            prepared?.discardAudio()
+        }
+        val created = ReaderSession(pagePort(target, createdOcr, settings), audio, pronunciations, ::onState,
             clock = SystemClock::elapsedRealtime, log = ReaderDiagnostics::event,
-            readingMode = preferences.readingMode())
+            readingMode = preferences.readingMode(), preparedStart = prepared)
+        warm?.prepared = null
+        return created
     }
 
     private fun onState(state: ReaderState) {
@@ -763,6 +795,7 @@ class ReaderAccessibility : AccessibilityService() {
 
     private fun clearSession() {
         discardWarmEngines()
+        session?.discardPreparedStart()
         session = null
         sessionWindow = null
         abortRestore = false

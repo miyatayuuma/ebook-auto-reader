@@ -392,6 +392,76 @@ class ReaderSessionTest {
         assertEquals(listOf(0, 1, 2), displayed)
     }
 
+    @Test
+    fun preparedStartReusesOnlyExactCurrentPageAndFirstAudio() = runTest {
+        val pages = FakePages(listOf(body("最初です。次です。"), body("続きです。")))
+        val audio = FakeAudio()
+        val prepared = requireNotNull(PreparedStart.prepare(pages, audio, Pronunciations()))
+        assertTrue(prepared.hasClip)
+        assertEquals(listOf(0), pages.decoded)
+        assertEquals(1, audio.clips.size)
+        assertTrue(pages.turns.isEmpty())
+        assertTrue(audio.starts.isEmpty())
+        assertEquals(pages.frames, pages.closedFrames)
+        val session = ReaderSession(pages, audio, Pronunciations(), {},
+            clock = { testScheduler.currentTime }, preparedStart = prepared)
+        val work = async { session.run() }
+        advanceTimeBy(100)
+        assertEquals(listOf("最初です。"), audio.starts)
+        assertEquals(1, audio.clips.count { it.spoken == "最初です。" })
+        assertEquals(1, pages.decoded.count { it == 0 })
+        work.cancelAndJoin()
+        assertEquals(audio.clips.size, audio.closedClips)
+        assertEquals(pages.frames, pages.closedFrames)
+    }
+
+    @Test
+    fun preparedStartRejectsManualPageChangeBeforeStart() = runTest {
+        val pages = FakePages(listOf(body("古いページ。"), body("新しいページ。")))
+        val audio = FakeAudio()
+        val prepared = requireNotNull(PreparedStart.prepare(pages, audio, Pronunciations()))
+        pages.display = 1
+        val session = ReaderSession(pages, audio, Pronunciations(), {},
+            clock = { testScheduler.currentTime }, preparedStart = prepared)
+        assertTrue(runCatching { session.run() }.isFailure)
+        assertEquals(listOf("新しいページ。"), audio.starts)
+        assertEquals(listOf(0, 1), pages.decoded)
+        assertEquals(audio.clips.size, audio.closedClips)
+    }
+
+    @Test
+    fun preparedStartKeepsCrossPageSentenceUnfinished() = runTest {
+        val pages = FakePages(listOf(body("川岸の石は"), body("光った。")))
+        val audio = FakeAudio()
+        val prepared = requireNotNull(PreparedStart.prepare(pages, audio, Pronunciations()))
+        assertFalse(prepared.hasClip)
+        assertTrue(audio.clips.isEmpty())
+        assertTrue(pages.turns.isEmpty())
+        val session = ReaderSession(pages, audio, Pronunciations(), {},
+            clock = { testScheduler.currentTime }, preparedStart = prepared)
+        assertTrue(runCatching { session.run() }.isFailure)
+        assertEquals(listOf("川岸の石は光った。"), audio.starts)
+        assertEquals(listOf(0, 1), pages.decoded)
+        assertEquals(pages.frames, pages.closedFrames)
+    }
+
+    @Test
+    fun preparedStartDiscardsMismatchedPronunciationAndUnclaimedAudio() = runTest {
+        val pages = FakePages(listOf(body("川岸です。")))
+        val audio = FakeAudio()
+        val prepared = requireNotNull(PreparedStart.prepare(pages, audio, Pronunciations()))
+        val different = SentenceBuffer(Pronunciations(book = listOf(PronunciationRule("川岸", "かわぎし"))))
+        different.add(0, prepared.page)
+        assertNull(prepared.takeClip(requireNotNull(different.poll())))
+        assertFalse(prepared.hasClip)
+        prepared.close()
+        assertEquals(1, audio.closedClips)
+        val unused = requireNotNull(PreparedStart.prepare(pages, audio, Pronunciations()))
+        unused.close()
+        unused.close()
+        assertEquals(2, audio.closedClips)
+    }
+
     private fun body(vararg lines: String) = PageText(lines.map { SourceLine(it) }, PageKind.BODY)
 
     private class FakePages(private val pages: List<PageText>,
@@ -414,6 +484,7 @@ class ReaderSessionTest {
         private inner class Frame(val page: Int) : PageFrame {
             override val signature = signature(page)
             override val pageNumber = numbers[page]
+            override suspend fun exactKey(): String = "fixture:${page}:${signatures[page]}:${numbers[page]}"
             override fun close() { closedFrames++ }
         }
 
