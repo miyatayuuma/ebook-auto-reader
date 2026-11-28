@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Ebook Auto Reader</string>
+    <string name="accessibility_description">読書中に明示的に開始したとき、DMMブックスの画面を端末内で文字認識し、ページを送ります。書籍の画像や本文を外部へ送信しません。</string>
+</resources>

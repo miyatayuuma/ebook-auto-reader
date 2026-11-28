@@ -23,14 +23,44 @@ BODY = [
 ]
 
 
-def render(root, font_path, font_index):
+DENSE = [
+    "水路の見回りを頼まれた朝、門番は地図を一枚くれた。紙は何度も折られて、角だけが柔らかくなっていた。",
+    "空音は地図を広げ、橋のたもとに描かれた小さな丸を指で押さえた。そこには名前も目印も書かれていなかった。",
+    "川沿いをしばらく歩くと、石垣の下から水の音がした。岸辺から見ると、小さな溝が堤の向こうへ続いている。",
+    "先週の雨で落ち葉が積もり、溝の入口をふさいでいた。枝を差し込んで少し持ち上げると、水が足元を抜けた。",
+    "空の色を映した流れが、砂の粒を運んでいく。空音はその様子を眺めながら、手帳に時刻と水の深さを書いた。",
+    "向こうから長靴をはいた人が歩いてきた。肩にかけた袋から、赤と白に塗った細い棒の先がのぞいていた。",
+    "その人は袋を降ろし、古い石段のいちばん下に棒を立てた。水が増えたときに、どこまで届くか調べるという。",
+    "二人で岸の高さを見比べると、同じように見えた石段にも差があった。左の端だけ石が少し沈んでいる。",
+    "石の間には草の根が伸びていた。むやみに引き抜けば石もゆるみそうなので、場所を記録して先へ進んだ。",
+    "昼前になると、水面の反射が強くなった。橋の影へ入ると、流れの底に木の実がいくつも転がっている。",
+    "岸に上がった二人は、並んでおにぎりを食べた。手帳を広げていると、風がページを一枚ずつめくった。",
+    "空音は古い記録を見返した。水が少ない日も、石段の端にある細い筋だけは、いつも濡れていたらしい。",
+    "石段の下へ戻ると、棒の目盛りが朝より二つ下がっていた。溝につまった葉を除いた先でも水が流れていた。",
+    "地図の丸に着いてようやく、そこが二つの水路が合わさる場所だとわかった。浅いほうには小魚が集まっていた。",
+    "もう片方の水路はまっすぐで、岸に背の高い草が茂っている。流れを横切る風が吹くたび、穂が一斉になびいた。",
+    "手帳に二本の線と丸を描き足し、水路の入口を丸で囲んだ。次に見回る人が迷わないよう、石段の数も書き添えた。",
+    "夕方、門番は地図を受け取って窓際で広げた。朝には何もなかった丸の横に、今日の日付と水の深さが並んだ。",
+    "帰り道、橋の上で空音は足を止めた。朝と同じ川を見ているのに、ここから先の流れまで想像できる気がした。",
+]
+
+
+BOTTOM = [
+    "速い風が吹き、川の向こうで細い葦が揺れた。空音は両手で白い帽子を押さえ、前を向いた。ここから先は静かな森だ。",
+    "石段の影には、赤い実がいくつも落ちていた。ひとつ拾うと、真ん中に黒い点があった。空音は実をそっと地面へ戻した。",
+    "遠くで鳥が鳴き、森の奥から友だちの声がした。返事をすると、木々の間から明るい光が差した。",
+]
+
+
+def render(root, font_path, font_index, dense=False):
     if not features.check_feature("raqm"):
         raise RuntimeError("Pillow with libraqm support is required for vertical glyphs")
     image_dir = root / "pages"
     image_dir.mkdir(parents=True, exist_ok=True)
     references = {}
 
-    def page(key, kind, size, columns=(), graph=False, folio=None, ruby=False):
+    def page(key, kind, size, columns=(), graph=False, folio=None, ruby=False, column_pitch=None,
+             start_y=200, start_x=950):
         image = Image.new("RGB", (1080, 2424), "#fffdf8")
         draw = ImageDraw.Draw(image)
         regions = []
@@ -42,13 +72,13 @@ def render(root, font_path, font_index):
             draw.text((x, y), value, fill="#201b19", **options)
             regions.append(dict(role=role, text=value, box=[int(v) for v in bounds], **metadata))
 
-        step = int(size * 1.9)
+        step = column_pitch or int(size * 1.9)
         for index, column in enumerate(columns):
-            x = 950 - index * step
+            x = start_x - index * step
             role = "heading" if kind == "chapter" else "body"
-            label(x, 200, column, size, role, True)
+            label(x, start_y, column, size, role, True)
             if ruby and index == 1:
-                label(x + int(size * 1.08), 200, "あおね", max(11, size // 2), "ruby", True,
+                label(x + int(size * 1.08), start_y, "あおね", max(11, size // 2), "ruby", True,
                       parentRegion=len(regions) - 1, surface="空音")
         if graph:
             left, top, right, bottom = 150, 1750, 855, 2020
@@ -64,6 +94,13 @@ def render(root, font_path, font_index):
 
     for size, suffix in [(22, "small"), (34, "medium"), (48, "large")]:
         page(f"body-{suffix}", "mixed", size, BODY, graph=True, folio="12", ruby=True)
+    if dense:
+        page("body-dense", "body", 32, DENSE, folio="14", ruby=True, column_pitch=49)
+        page("body-bottom", "body", 41, BOTTOM, folio="27", start_y=155)
+        page("short-a", "body", 42, ["鳥が鳴いた。"])
+        page("short-b", "body", 42, ["風がやんだ。"])
+        page("short-c", "body", 42, ["雲が流れた。"], start_y=270)
+        page("body-narrow", "body", 23, BODY[:7], column_pitch=38, start_y=470, start_x=745)
     page("chapter", "chapter", 66, ["第二章　橋の向こう"], folio="13")
     page("figure", "figure", 34, graph=True)
     page("blank", "blank", 34)
@@ -78,7 +115,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=OUT / "fixtures")
     parser.add_argument("--gothic", action="store_true")
+    parser.add_argument("--dense", action="store_true", help="Include the P2 dense vertical page")
     parser.add_argument("--font")
     parser.add_argument("--font-index", type=int, default=0)
     args = parser.parse_args()
-    render(args.out, args.font or (SANS if args.gothic else SERIF), args.font_index)
+    render(args.out, args.font or (SANS if args.gothic else SERIF), args.font_index, dense=args.dense)

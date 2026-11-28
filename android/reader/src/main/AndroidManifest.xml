@@ -1,0 +1,32 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+        <package android:name="com.dmm.app.dmmbooks_google_play" />
+    </queries>
+    <application android:label="@string/app_name" android:allowBackup="false"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity android:name=".ReaderActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <receiver android:name=".ReaderControlReceiver" android:exported="false" />
+        <service android:name=".ReaderTileService" android:exported="true"
+            android:icon="@android:drawable/ic_media_play" android:label="Ebook Auto Reader"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE" /></intent-filter>
+        </service>
+        <service android:name=".ReaderAccessibility" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true" android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data android:name="android.accessibilityservice" android:resource="@xml/reader_accessibility" />
+        </service>
+    </application>
+</manifest>

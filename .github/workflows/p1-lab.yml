@@ -3,6 +3,8 @@ name: P1 Lab
 on:
   pull_request:
     branches: [main]
+    paths:
+      - "p1/**"
 
 permissions:
   contents: read
@@ -66,7 +68,7 @@ jobs:
           python -m pip install Pillow==13.0.0
           python p1/fixtures.py
           python p1/reading.py prepare
-          gradle -p android :app:assembleDebug :app:testDebugUnitTest
+          gradle -p android :app:assembleDebug :app:testDebugUnitTest :ndl:testDebugUnitTest
       - uses: actions/upload-artifact@v4
         with:
           name: p1-debug

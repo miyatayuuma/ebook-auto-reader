@@ -1,0 +1,280 @@
+package io.github.ebookautoreader.reader
+
+import kotlin.math.abs
+import kotlin.math.roundToInt
+
+internal data class Box(val left: Int, val top: Int, val right: Int, val bottom: Int) {
+    val width get() = right - left
+    val height get() = bottom - top
+    val centerX get() = (left + right) / 2
+    val area get() = width * height
+    fun intersection(other: Box) =
+        (minOf(right, other.right) - maxOf(left, other.left)).coerceAtLeast(0) *
+            (minOf(bottom, other.bottom) - maxOf(top, other.top)).coerceAtLeast(0)
+}
+
+internal data class Region(
+    val box: Box,
+    val type: Int,
+    val detection: Float,
+    val text: String = "",
+    val certainty: Float = 0f,
+    val complete: Boolean = true,
+) {
+    val vertical get() = box.height > box.width
+}
+
+internal object ReflowLayout {
+    val textTypes = setOf(1, 2, 4, 5, 10, 16)
+    val structuralTypes = setOf(0, 3, 6, 7, 8, 9, 11, 12, 13, 14, 15)
+    private val visualTypes = setOf(6, 11, 15)
+
+    private fun ignored(regions: List<Region>) = regions.filter { it.type in setOf(8, 9) && it.detection >= 0.6f }
+
+    private fun coveredByHeaderOrFooter(region: Region, ignored: List<Region>) =
+        ignored.any {
+            val verticalBody = region.type == 1 && region.box.height >= region.box.width * 2.5
+            region.box.intersection(it.box) >= region.box.area * 0.85 &&
+                !(it.type == 9 && verticalBody)
+        }
+
+    private fun isFolio(region: Region, width: Int, height: Int): Boolean {
+        val text = region.text.trim()
+        return !region.vertical && region.box.top >= height * 0.9 &&
+            region.box.height <= height * 0.035 && region.box.width <= width * 0.12 &&
+            text.length in 1..5 && text.all { it.isDigit() }
+    }
+
+    private fun headerReason(region: Region, ignored: List<Region>): String? =
+        if (coveredByHeaderOrFooter(region, ignored)) "detected_header_or_footer" else null
+
+    fun recognitionCandidates(regions: List<Region>): Set<Region> {
+        val ignored = ignored(regions)
+        return regions.filterTo(HashSet()) {
+            when (it.type) {
+                10 -> it.detection >= 0.35f && headerReason(it, ignored) == null
+                in textTypes -> headerReason(it, ignored) == null
+                else -> false
+            }
+        }
+    }
+
+    fun read(
+        regions: List<Region>, width: Int, height: Int, uniformLight: Boolean,
+        reportClassification: (String) -> Unit = {},
+        reportRegion: (String) -> Unit = {},
+        reportBottomLines: (Int) -> Unit = {},
+    ): PageText {
+        val ignored = ignored(regions)
+        val rubyCandidates = regions.filter { headerReason(it, ignored) == null && it.type == 10 && it.detection >= 0.35f &&
+            it.certainty >= 0.65f && it.complete && it.text.isReading() }
+        val lines = mutableListOf<Region>()
+        val candidates = regions.filter { it.type in setOf(1, 2, 4, 5, 16) }
+            .sortedWith(compareByDescending<Region> { it.complete && it.text.isNotBlank() }
+                .thenByDescending { it.detection })
+        for (candidate in candidates) {
+            val box = candidate.box
+            if (headerReason(candidate, ignored) != null || isFolio(candidate, width, height)) continue
+            if (rubyCandidates.any {
+                    maxOf(box.area, it.box.area) * 0.85 <= box.intersection(it.box)
+                }) continue
+            if (lines.any { box.intersection(it.box) >= maxOf(box.area, it.box.area) * 0.82 }) continue
+            lines += candidate
+        }
+        val substantive = lines.filter { it.type == 1 || it.type == 16 }
+        val captions = lines.filter { it.type in setOf(2, 4, 5) && it.complete && hasJapanese(it.text) }
+        val visuals = regions.filter { it.type in visualTypes && it.detection >= 0.68f &&
+            it.box.area.toLong() >= width.toLong() * height * 0.04 }
+        // Only dismiss an enclosing structure when its bounds closely match a
+        // confirmed visual together with successfully recognized captions.
+        val ambiguous = regions.filter { it.type in setOf(0, 3, 7, 12, 13, 14) }
+            .filter { region ->
+                val header = headerReason(region, ignored) != null
+                val duplicate = region.box.area > 0 && visuals.any { visual ->
+                    val insideVisual = region.box.intersection(visual.box).toLong() >= region.box.area.toLong() * .85
+                    val overlapsCaptions = captions.filter { region.box.intersection(it.box) > 0 }
+                    val components = listOf(visual) + overlapsCaptions
+                    val envelope = Box(components.minOf { it.box.left }, components.minOf { it.box.top },
+                        components.maxOf { it.box.right }, components.maxOf { it.box.bottom })
+                    val encloses = components.all { it.box.area > 0 &&
+                        region.box.intersection(it.box).toLong() >= it.box.area.toLong() * .85 } &&
+                        region.box.area.toLong() <= envelope.area.toLong() * 1.25
+                    insideVisual || encloses
+                }
+                // A short text-only page may be labeled as a caption by the detector.
+                // Discard an enclosing structure only if a recognized line explains it.
+                val textDuplicate = visuals.isEmpty() && region.box.area > 0 && captions.any { line ->
+                    line.box.area > 0 &&
+                        region.box.intersection(line.box).toLong() >= line.box.area.toLong() * .85 &&
+                        region.box.area.toLong() <= line.box.area.toLong() * 1.25
+                }
+                // NDLOCR may emit a text-block structure (type 0) around multiple
+                // caption lines separately from the illustration. It is not an
+                // unknown structure if the recognized lines explain its bounds.
+                val captionBlock = region.type == 0 && explainedCaptionBlock(region.box, captions)
+                !header && !duplicate && !textDuplicate && !captionBlock
+            }
+        for (region in regions) {
+            val reason = headerReason(region, ignored) ?: when {
+                region in ambiguous -> "blocking_structure"
+                region in substantive -> "body_or_heading"
+                region in captions -> "recognized_caption"
+                region in rubyCandidates -> "ruby_candidate"
+                isFolio(region, width, height) -> "numeric_folio"
+                region.type in setOf(0, 3, 7, 12, 13, 14) -> "duplicate_structure"
+                region in visuals -> "confirmed_visual"
+                else -> "other"
+            }
+            val b = region.box
+            reportRegion("type=${region.type} box=${b.left.toDouble()/width},${b.top.toDouble()/height}," +
+                "${b.right.toDouble()/width},${b.bottom.toDouble()/height} confidence=${region.detection} reason=$reason")
+        }
+        if (substantive.any { !it.complete || it.text.isBlank() } ||
+            substantive.isNotEmpty() && substantive.none { hasJapanese(it.text) }) {
+            reportClassification("kind=undetermined reason=incomplete_body")
+            throw ReaderFailure("本文候補の一部を認識できません。表示と文字サイズを確認してください。", "ocr_incomplete_body")
+        }
+        val failedCaptions = lines.count { it.type in setOf(2, 4, 5) &&
+            (!it.complete || it.text.isBlank() || !hasJapanese(it.text)) }
+        val kind = when {
+            substantive.any { it.type == 1 } -> PageKind.BODY
+            substantive.isNotEmpty() -> PageKind.HEADING
+            visuals.isNotEmpty() && ambiguous.isEmpty() && failedCaptions == 0 -> PageKind.FIGURE
+            visuals.isEmpty() && captions.isNotEmpty() && ambiguous.isEmpty() && failedCaptions == 0 -> PageKind.HEADING
+            uniformLight && regions.isEmpty() -> PageKind.BLANK
+            else -> {
+                val reason = when {
+                    visuals.isEmpty() -> "no_confirmed_visual"
+                    ambiguous.isNotEmpty() -> "ambiguous_structure"
+                    else -> "unreadable_caption"
+                }
+                reportClassification("kind=undetermined reason=$reason visuals=${visuals.size} ambiguous=${ambiguous.size} failedCaptions=$failedCaptions")
+                throw ReaderFailure("本文・図表・白紙を確定できません。表示ページを確認してください。", "ocr_unclassified_page")
+            }
+        }
+        reportClassification("kind=$kind reason=classified visuals=${visuals.size} ambiguous=${ambiguous.size} failedCaptions=$failedCaptions")
+        val ruby = mutableMapOf<Region, MutableList<Reading>>()
+        for (small in rubyCandidates) {
+            val parent = substantive.filter { canParent(it, small) }.singleOrNull() ?: continue
+            val reading = associate(parent, small) ?: continue
+            ruby.getOrPut(parent) { mutableListOf() }.add(reading)
+        }
+        val ordered = order(substantive) + order(captions)
+        reportBottomLines(ordered.count { it.box.bottom >= height * 0.87 })
+        return PageText(ordered.map { line ->
+            val box = line.box
+            SourceLine(line.text, ruby[line].orEmpty(), LineBounds(box.left, box.top, box.right, box.bottom),
+                describeLine(line, substantive, visuals.isNotEmpty()))
+        }, kind)
+    }
+
+    // Descriptive evidence only: never discard or reorder a line using this estimate.
+    private fun describeLine(line: Region, body: List<Region>, hasVisual: Boolean): LineLayout {
+        fun size(region: Region) = if (region.vertical) region.box.width else region.box.height
+        val size = size(line).coerceAtLeast(0)
+        val references = body.filter { it.type == 1 && it.vertical == line.vertical &&
+            it.detection >= .68f && size(it) > 0 }.map(::size).sorted()
+        val ratio = if (references.size >= 3 && size > 0) size.toFloat() / references[references.size / 2] else null
+        val role = when {
+            line.type in setOf(2, 4, 5) -> if (hasVisual) LineRole.CAPTION else LineRole.UNKNOWN
+            line.type == 16 || (line.type == 1 && ratio != null && ratio >= 1.3f) -> LineRole.HEADING_CANDIDATE
+            line.type == 1 -> LineRole.BODY
+            else -> LineRole.UNKNOWN
+        }
+        return LineLayout(line.type, line.detection, line.certainty, line.vertical, size, ratio, role)
+    }
+
+    private fun explainedCaptionBlock(block: Box, captions: List<Region>): Boolean {
+        if (block.area <= 0) return false
+        val inside = captions.map { it.box }.filter { it.area > 0 &&
+            block.intersection(it).toLong() >= it.area.toLong() * .85 }
+        if (inside.isEmpty()) return false
+        val envelope = Box(inside.minOf { it.left }, inside.minOf { it.top },
+            inside.maxOf { it.right }, inside.maxOf { it.bottom })
+        val overlap = block.intersection(envelope).toLong()
+        // Require mutual coverage, not just that the block contains some text.
+        // The 50% line-area floor rejects a large unexplained gap between lines.
+        return overlap >= block.area.toLong() * .85 &&
+            overlap >= envelope.area.toLong() * .85 &&
+            inside.sumOf { block.intersection(it).toLong() } >= block.area.toLong() * .5
+    }
+
+    private fun hasJapanese(text: String) = text.any { it in 'ぁ'..'ヿ' || it in '㐀'..'鿿' }
+
+    private fun order(lines: List<Region>): List<Region> {
+        val vertical = lines.filter { it.vertical }
+        val horizontal = lines.filterNot { it.vertical }
+            .sortedWith(compareBy({ it.box.top }, { it.box.left }))
+        if (vertical.isEmpty()) return horizontal
+        val leading = horizontal.filter { it.type == 16 && it.box.bottom <= vertical.minOf { v -> v.box.top } }
+        return leading + verticalOrder(vertical) + horizontal.filterNot { it in leading }
+    }
+
+    private fun verticalOrder(lines: List<Region>): List<Region> {
+        if (lines.size < 2) return lines
+        val pitch = lines.map { it.box.width }.sorted()[lines.size / 2].coerceAtLeast(1)
+        val byTop = lines.sortedBy { it.box.top }
+        var bottom = byTop.first().box.bottom
+        for (index in 1 until byTop.size) {
+            val line = byTop[index]
+            val above = byTop.subList(0, index)
+            val below = byTop.subList(index, byTop.size)
+            if (line.box.top - bottom >= pitch * 1.5 &&
+                hasMultipleColumns(above, pitch) && hasMultipleColumns(below, pitch) &&
+                above.any { upper -> below.any { abs(it.box.centerX - upper.box.centerX) <= pitch } }) {
+                return verticalOrder(above) + verticalOrder(below)
+            }
+            bottom = maxOf(bottom, line.box.bottom)
+        }
+
+        val columns = mutableListOf<MutableList<Region>>()
+        for (line in lines.sortedByDescending { it.box.centerX }) {
+            val last = columns.lastOrNull()
+            if (last != null && abs(last.first().box.centerX - line.box.centerX) <= pitch * 0.55) {
+                last.add(line)
+            } else {
+                columns.add(mutableListOf(line))
+            }
+        }
+        return columns.flatMap { column -> column.sortedBy { it.box.top } }
+    }
+
+    private fun hasMultipleColumns(lines: List<Region>, pitch: Int) =
+        lines.maxOf { it.box.centerX } - lines.minOf { it.box.centerX } >= pitch
+
+    private fun canParent(parent: Region, ruby: Region): Boolean {
+        val main = parent.box
+        val small = ruby.box
+        val gap = small.left - main.right
+        return parent.vertical && ruby.vertical && small.width <= main.width * 0.8 &&
+            small.centerX > main.centerX && gap >= -main.width * 0.25 && gap <= main.width * 1.5 &&
+            small.top >= main.top - main.width * 0.6 && small.bottom <= main.bottom + main.width * 0.6
+    }
+
+    private fun associate(parent: Region, ruby: Region): Reading? {
+        val text = parent.text
+        val glyphs = mutableListOf<IntRange>()
+        var offset = 0
+        while (offset < text.length) {
+            val end = offset + Character.charCount(text.codePointAt(offset))
+            glyphs.add(offset until end)
+            offset = end
+        }
+        if (glyphs.isEmpty()) return null
+        val pitch = parent.box.height.toDouble() / glyphs.size
+        if (pitch !in (parent.box.width * 0.68)..(parent.box.width * 2.2)) return null
+        val first = ((ruby.box.top - parent.box.top) / pitch).roundToInt().coerceAtLeast(0)
+        val last = ((ruby.box.bottom - parent.box.top) / pitch).roundToInt().coerceAtMost(glyphs.size)
+        if (first >= last || last - first > 8) return null
+        val startError = abs(ruby.box.top - (parent.box.top + first * pitch))
+        val endError = abs(ruby.box.bottom - (parent.box.top + last * pitch))
+        if (startError > pitch * 0.36 || endError > pitch * 0.40) return null
+        val start = glyphs[first].first
+        val end = glyphs[last - 1].last + 1
+        if (glyphs.subList(first, last).any {
+            val cp = text.codePointAt(it.first)
+            Character.UnicodeScript.of(cp) != Character.UnicodeScript.HAN && cp != '々'.code
+        }) return null
+        return Reading(start, end, ruby.text)
+    }
+}
