@@ -36,6 +36,12 @@ internal class WindowPages(
 ) : ReaderPages {
     private val captureExecutor = Dispatchers.Default.asExecutor()
 
+    // A single screenshot for the debug page-number measurement.
+    suspend fun captureForPageNumber(): ScreenFrame {
+        val target = resolve() ?: throw ReaderFailure("DMMの本文ページを表示してください。", "window_changed")
+        return captureOnce(target)
+    }
+
     override suspend fun capture(): PageFrame {
         val target = resolve() ?: throw ReaderFailure("DMMの本文ページを表示してください。")
         val first = captureOnce(target)

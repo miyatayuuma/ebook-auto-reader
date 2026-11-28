@@ -113,3 +113,15 @@ adb shell -T run-as io.github.ebookautoreader.debug sh -c \
 ```
 
 ルビは推定した親語に付け、確信のあるものだけ使用します。書籍別辞書、条件付きの共通辞書が続き、残りはGoogle TTSの読み推定を使います。OCRは[国立国会図書館のNDLOCR-Lite 2.0.0](https://pypi.org/project/ndlocr-lite/2.0.0/)のAndroid移植です。
+
+### ページ番号 OCR 診断（P2.5A-1）
+
+デバッグ版でアクセシビリティサービスを有効にし、DMMのページ番号が表示された本文を開いて、アイドル中に次を実行する。ページ移動や本文OCR・TTSは行わない。
+
+```bash
+adb shell am broadcast -a io.github.ebookautoreader.DEBUG_READER \
+  -p io.github.ebookautoreader.debug --es command page-number
+adb logcat -d -s EbookReader:I | grep 'page_number result='
+```
+
+`number` は認識番号、`captureMs` は画像取得、`ocrMs` は数字OCR、`totalMs` は全体のミリ秒。`result=unrecognized` は番号を特定できなかった場合、`result=error` は取得・処理失敗を表す。`-1` は当該処理を開始していないことを表す。本文、書名、画像はログに含めない。Pixel 9 の複数ページで番号と時間を目視照合する。初回は認識器の初期化を含むため、初回と2回目以降を分けて確認する。
