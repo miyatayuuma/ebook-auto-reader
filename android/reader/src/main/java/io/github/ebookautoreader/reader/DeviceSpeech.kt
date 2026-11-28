@@ -28,8 +28,6 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-internal const val MIN_SPEECH_RATE = 0.65f
-internal const val MAX_SPEECH_RATE = 1.65f
 internal const val OUTPUT_LEAD_MS = 280
 internal const val GOOGLE_TTS = "com.google.android.tts"
 internal val speechAttributes = AudioAttributes.Builder()
@@ -41,10 +39,10 @@ internal data class SpeechSettings(val voice: String?, val rate: Float = 1f, val
 
 internal class ReaderPreferences(context: Context) {
     private val store = context.getSharedPreferences("reader", Context.MODE_PRIVATE)
-    fun speech() = SpeechSettings(store.getString("voice", null), store.getFloat("rate", 1f).coerceIn(MIN_SPEECH_RATE, MAX_SPEECH_RATE),
+    fun speech() = SpeechSettings(store.getString("voice", null), SpeechRate.normalize(store.getFloat("rate", 1f)),
         store.getFloat("pitch", 1f))
     fun saveVoice(voice: String?) { store.edit().putString("voice", voice).apply() }
-    fun saveRate(rate: Float) { store.edit().putFloat("rate", rate).apply() }
+    fun saveRate(rate: Float) { store.edit().putFloat("rate", SpeechRate.normalize(rate)).apply() }
     fun savePitch(pitch: Float) { store.edit().putFloat("pitch", pitch).apply() }
 
     fun observe(listener: android.content.SharedPreferences.OnSharedPreferenceChangeListener) =
@@ -238,8 +236,10 @@ internal class DeviceAudio(
     private var lastCompleted: Long? = null
 
     fun setRate(value: Float) {
-        rate = value
-        player?.applyRate(value)
+        val normalized = SpeechRate.normalize(value)
+        // Keep the active rate and buffer estimate unchanged if the player rejects it.
+        player?.applyRate(normalized)
+        rate = normalized
     }
 
     fun startOutput() {

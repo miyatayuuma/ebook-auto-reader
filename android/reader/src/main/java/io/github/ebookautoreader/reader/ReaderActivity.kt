@@ -69,7 +69,8 @@ class ReaderActivity : Activity() {
         voices = Spinner(this).also(content::addView)
         voiceInfo = text("日本語オフライン音声を確認中…", 14).also(content::addView)
         button(content, "音声一覧を更新") { loadVoices() }
-        rate = slider(content, "読み上げ速度", selection.rate, 65, 165, preferences::saveRate)
+        rate = slider(content, "読み上げ速度", selection.rate,
+            SpeechRate.MIN_PERCENT, SpeechRate.MAX_PERCENT, preferences::saveRate, SpeechRate.STEP_PERCENT)
         pitch = slider(content, "声の高さ", selection.pitch, 75, 130, preferences::savePitch)
         preview = button(content, "サンプルを試聴") { audition() }
         content.addView(text("ページ送り設定", 21))
@@ -96,7 +97,7 @@ class ReaderActivity : Activity() {
     override fun onResume() {
         super.onResume()
         val saved = preferences.speech()
-        rate.progress = (saved.rate * 100).roundToInt() - 65
+        rate.progress = SpeechRate.progress(saved.rate)
         pitch.progress = (saved.pitch * 100).roundToInt() - 75
         val own = ComponentName(this, ReaderAccessibility::class.java)
         val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
@@ -147,7 +148,7 @@ class ReaderActivity : Activity() {
 
     private fun settings() = SpeechSettings(
         if (voiceLoaded) names.getOrNull(voices.selectedItemPosition - 1) else preferences.speech().voice,
-        (65 + rate.progress) / 100f, (75 + pitch.progress) / 100f,
+        SpeechRate.fromProgress(rate.progress), (75 + pitch.progress) / 100f,
     )
 
     private fun audition(exportSample: Boolean = false) {
@@ -217,17 +218,18 @@ class ReaderActivity : Activity() {
 
     private fun slider(
         content: LinearLayout, label: String, value: Float, min: Int, max: Int, save: (Float) -> Unit,
+        step: Int = 1,
     ): SeekBar {
         val caption = text("", 15).also(content::addView)
         return SeekBar(this).apply {
             contentDescription = label
-            this.max = max - min
-            progress = (kotlin.math.round(value * 100).toInt() - min).coerceIn(0, this.max)
-            caption.text = "$label　${min + progress}%"
+            this.max = (max - min) / step
+            progress = ((value * 100 - min) / step).roundToInt().coerceIn(0, this.max)
+            caption.text = "$label　${min + progress * step}%"
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    caption.text = "$label　${min + progress}%"
-                    if (fromUser) save((min + progress) / 100f)
+                    caption.text = "$label　${min + progress * step}%"
+                    if (fromUser) save((min + progress * step) / 100f)
                 }
                 override fun onStartTrackingTouch(bar: SeekBar?) = Unit
                 override fun onStopTrackingTouch(bar: SeekBar?) = Unit
