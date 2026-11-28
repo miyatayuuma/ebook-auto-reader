@@ -66,6 +66,7 @@ class ReaderAccessibility : AccessibilityService() {
     private var targetMissing = false
     private val pageNumberOcr = mutableMapOf<PageNumberModel, PageNumberOcr>()
     private val pageNumberAttempts = mutableMapOf<PageNumberModel, Int>()
+    private val digitTemplates = TemplatePageNumberOcr()
     private var commandPending = false
 
     private val speechPreferenceChanged = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
@@ -105,7 +106,7 @@ class ReaderAccessibility : AccessibilityService() {
                 "page-number" -> {
                     val models = PageNumberModel.selection(intent.getStringExtra("model"))
                     if (models == null) ReaderDiagnostics.event("page_number result=error reason=invalid_model")
-                    else diagnosePageNumber(target, models)
+                    else diagnosePageNumber(target, models, intent.getBooleanExtra("compare", false), intent.getBooleanExtra("learn", true), intent.getBooleanExtra("reset", false))
                 }
                 "turn", "turn-headless" -> {
                     val methodName = intent.getStringExtra("method") ?: "TAP"
@@ -364,7 +365,8 @@ class ReaderAccessibility : AccessibilityService() {
         }
     }
 
-    private fun diagnosePageNumber(target: ReaderWindow, models: List<PageNumberModel>) {
+    private fun diagnosePageNumber(target: ReaderWindow, models: List<PageNumberModel>, compare: Boolean, learn: Boolean, reset: Boolean) {
+        if (reset) digitTemplates.reset("diagnostic_reset")
         probeWindow = target
         change(Mode.PROBE, "ページ番号を認識中…")
         operate("page_number") {
@@ -384,9 +386,36 @@ class ReaderAccessibility : AccessibilityService() {
                         val ocrStart = SystemClock.elapsedRealtime()
                         var result = "error"
                         var number: Int? = null
+                        var details = ""
                         try {
-                            val engine = pageNumberOcr.getOrPut(model) { PageNumberOcr(model) }
-                            number = engine.read(it.bitmap, target.bounds, screen)
+                            if (model == PageNumberModel.TEMPLATE) {
+                                val fastStart = SystemClock.elapsedRealtimeNanos()
+                                val analyzed = digitTemplates.analyze(it.bitmap, target.bounds, screen, target.id)
+                                val fastMs = (SystemClock.elapsedRealtimeNanos() - fastStart) / 1_000_000.0
+                                val match = analyzed.second
+                                number = match.number
+                                val method = if (number == null) "mlkit" else "template"
+                                var mlNumber: Int? = null
+                                var learning = if (learn) "not_needed" else "disabled"
+                                if (number == null || compare) {
+                                    val engine = pageNumberOcr.getOrPut(PageNumberModel.JAPANESE) {
+                                        PageNumberOcr(PageNumberModel.JAPANESE)
+                                    }
+                                    val mlResult = engine.readDetailed(it.bitmap, target.bounds, screen)
+                                    mlNumber = mlResult.number
+                                    if (number == null) number = mlNumber
+                                    if (learn && match.number == null) learning = digitTemplates.learn(analyzed.first, mlResult)
+                                }
+                                details = " method=$method learned=${digitTemplates.learned}" +
+                                    " segments=${analyzed.first?.glyphs?.size ?: 0} learn=$learning" +
+                                    " reset=${digitTemplates.takeResetReason()} fastMs=$fastMs" +
+                                    " template=${match.number ?: "unknown"} mlkit=${mlNumber ?: "not_run_or_unknown"}" +
+                                    " error=${match.error ?: "none"} gap=${match.gap ?: "none"}" +
+                                    " fallback=${match.reason ?: "none"}"
+                            } else {
+                                val engine = pageNumberOcr.getOrPut(model) { PageNumberOcr(model) }
+                                number = engine.read(it.bitmap, target.bounds, screen)
+                            }
                             result = if (number == null) "unrecognized" else "ok"
                             if (number != null) successful = true
                         } catch (error: CancellationException) {
@@ -397,7 +426,7 @@ class ReaderAccessibility : AccessibilityService() {
                         } finally {
                             ReaderDiagnostics.event("page_number result=$result model=${model.argument}" +
                                 " phase=${if (attempt == 1) "first" else "subsequent"} attempt=$attempt" +
-                                " number=${number ?: "unknown"} captureMs=$captureMs" +
+                                " number=${number ?: "unknown"}$details captureMs=$captureMs" +
                                 " ocrMs=${SystemClock.elapsedRealtime() - ocrStart}" +
                                 " totalMs=${SystemClock.elapsedRealtime() - started}")
                         }
@@ -478,6 +507,7 @@ class ReaderAccessibility : AccessibilityService() {
             return change(Mode.IDLE, "対象の表示が変わりました。読み上げを開始し直してください。", expand = true)
         }
         val settings = turnSettings(target)
+        if (session == null) digitTemplates.reset("new_session")
         val startedAt = SystemClock.elapsedRealtime()
         sessionWindow = target
         change(Mode.READING, "準備中…")

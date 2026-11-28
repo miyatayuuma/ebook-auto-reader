@@ -9,6 +9,7 @@ class PageNumberModelTest {
         assertEquals(listOf(PageNumberModel.JAPANESE), PageNumberModel.selection(null))
         assertEquals(listOf(PageNumberModel.JAPANESE), PageNumberModel.selection("japanese"))
         assertEquals(listOf(PageNumberModel.LATIN), PageNumberModel.selection("latin"))
+        assertEquals(listOf(PageNumberModel.TEMPLATE), PageNumberModel.selection("template"))
         assertEquals(listOf(PageNumberModel.JAPANESE, PageNumberModel.LATIN), PageNumberModel.selection("both"))
         assertNull(PageNumberModel.selection("invalid"))
     }

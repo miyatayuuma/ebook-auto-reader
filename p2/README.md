@@ -144,3 +144,16 @@ adb logcat -d -s EbookReader:I | grep 'page_number result=' | tail -n 2
 ```
 
 `phase=first` はアクセシビリティサービス起動後、そのモデルを初めて呼び出した試行で、`phase=subsequent` は2回目以降。`attempt` はモデルごとの試行回数。初回が失敗した場合、2回目が十分ウォーム状態とは限らない。認識器はサービス存続中はモデルごとに再利用する。`captureMs` は共通、`ocrMs` は各モデル単独の処理時間、`totalMs` は診断開始から各モデルの完了までの累積時間なので、両者の速度比較には `ocrMs` を使う。処理順序の影響もあり得るため、単独実行も比較する。複数ページで表示番号と照合し、精度と初回・2回目以降の処理時間を記録する。画像、書籍名、本文は保存・出力しない。
+
+#### 数字テンプレートの実機比較
+
+診断専用。新しい比較を始めるときは最初の呼び出しに `--ez reset true` を付ける。DMMのページを手動で変えながら実行する。同じページの繰り返しは学習を増やさない。学習を止めて未観測ページで比較するには `--ez learn false` を付ける。どちらも `--ez compare true` で同一画像のML Kit結果と比較できる。
+
+```bash
+adb shell am broadcast -a io.github.ebookautoreader.DEBUG_READER -p io.github.ebookautoreader.debug --es command page-number --es model template --ez compare true --ez reset true
+adb shell am broadcast -a io.github.ebookautoreader.DEBUG_READER -p io.github.ebookautoreader.debug --es command page-number --es model template --ez compare true
+adb shell am broadcast -a io.github.ebookautoreader.DEBUG_READER -p io.github.ebookautoreader.debug --es command page-number --es model template --ez compare true --ez learn false
+adb logcat -d -s EbookReader:I | grep 'page_number result='
+```
+
+`learn` は採用・拒否理由、`reset` は初期化理由、`segments` は分離個数、`error` と `gap` は照合誤差と候補差、`fastMs` は画像切り出し・分離を含む高速判定時間、`ocrMs` は比較を含む処理時間。数字の位置をML Kitの文字位置と対応付けられない場合は学習しない。本文や画像はログに出力しない。
