@@ -280,6 +280,10 @@ class ReaderAccessibility : AccessibilityService() {
             this, { currentWindow()?.takeIf { it == target } }, ::awaitReaderWindow,
             { _, send -> awaitReaderWindow(target); send() },
             { hasReaderMenu(target) }, ::awaitScreenshotSlot, settings,
+            { frame, window ->
+                pageNumberOcr.getOrPut(PageNumberModel.JAPANESE) { PageNumberOcr(PageNumberModel.JAPANESE) }
+                    .read(frame.bitmap, window.bounds, manager.maximumWindowMetrics.bounds)
+            },
         ) { frame ->
             requireNotNull(engine).read(frame.bitmap, frame.uniformLight) {
                 ocrProgress = it

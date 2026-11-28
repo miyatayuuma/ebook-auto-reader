@@ -1,21 +1,19 @@
 package io.github.ebookautoreader.reader
 
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import java.io.Closeable
 
 internal class ReaderFailure(message: String, val reason: String = "reader_failure") : Exception(message)
 
 internal interface PageFrame : Closeable {
     val signature: PageSignature
+    val pageNumber: Int? get() = null
 }
 internal interface ReaderPages {
     suspend fun capture(): PageFrame
@@ -62,7 +60,7 @@ internal class ReaderSession(
         const val MAX_CLIPS = 8
     }
 
-    private data class KnownPage(val index: Int, val signature: PageSignature)
+    private data class KnownPage(val index: Int, val signature: PageSignature, val pageNumber: Int?)
     private data class CapturedPage(val index: Int, val frame: PageFrame)
     private class Pending(val unit: ReadingUnit, var clip: ReaderClip? = null)
 
@@ -295,7 +293,7 @@ internal class ReaderSession(
             update(state.copy(stage = ReaderStage.CAPTURE))
             val frame = pages.capture()
             milestone("capture")
-            register(KnownPage(0, frame.signature))
+            register(KnownPage(0, frame.signature, frame.pageNumber))
             frames.addLast(CapturedPage(0, frame))
             captured = 0
             update(state)
@@ -352,7 +350,8 @@ internal class ReaderSession(
             update(state.copy(displayed = null))
             throw failure
         }
-        if (frame.signature.matches(expected.signature)) return frame
+        if (frame.signature.matches(expected.signature) &&
+            (frame.pageNumber == null || expected.pageNumber == null || frame.pageNumber == expected.pageNumber)) return frame
         frame.close()
         trusted = false
         update(state.copy(displayed = null))
@@ -379,13 +378,13 @@ internal class ReaderSession(
         currentCoroutineContext().ensureActive()
         var result: PageFrame? = null
         try {
-            withContext(NonCancellable) {
+            run {
                 trusted = false
                 update(state.copy(displayed = null))
-                val frame = withTimeoutOrNull(8_000) { turn() }
-                    ?: throw ReaderFailure("ページ遷移の確認が時間内に完了しませんでした。", "page_in_transition")
+                val frame = turn()
                 result = frame
-                val matches = if (expected != null) frame.signature.matches(expected.signature)
+                val matches = if (expected != null) frame.signature.matches(expected.signature) &&
+                    (expected.pageNumber == null || frame.pageNumber == null || expected.pageNumber == frame.pageNumber)
                     else forward && recent.all { frame.signature.compare(it) == PageComparison.DIFFERENT }
                 if (frame.signature.matches(from.signature)) {
                     // The source confirmed stable captures with the original page.
@@ -399,7 +398,7 @@ internal class ReaderSession(
                     }
                     throw ReaderFailure("送り先のページを確認できません。表示位置を確認してください。", "page_position_unknown")
                 }
-                register(KnownPage(target, frame.signature))
+                register(KnownPage(target, frame.signature, frame.pageNumber))
             }
             currentCoroutineContext().ensureActive()
             return requireNotNull(result)

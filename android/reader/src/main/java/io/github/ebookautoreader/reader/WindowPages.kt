@@ -20,7 +20,7 @@ import kotlin.coroutines.resumeWithException
 
 internal data class ReaderWindow(val id: Int, val owner: String, val bounds: Rect)
 
-internal class ScreenFrame(val bitmap: Bitmap, override val signature: PageSignature, val uniformLight: Boolean) :
+internal class ScreenFrame(val bitmap: Bitmap, override val signature: PageSignature, val uniformLight: Boolean, override var pageNumber: Int? = null) :
     PageFrame {
     override fun close() = bitmap.recycle()
 }
@@ -33,6 +33,7 @@ internal class WindowPages(
     private val menuControlsVisible: () -> Boolean,
     private val screenshotSlot: suspend () -> Unit,
     private val turn: TurnSettings,
+    private val pageNumber: suspend (ScreenFrame, ReaderWindow) -> Int?,
     private val readPage: suspend (ScreenFrame) -> PageText,
 ) : ReaderPages {
     private val captureExecutor = Dispatchers.Default.asExecutor()
@@ -59,7 +60,9 @@ internal class WindowPages(
         if (service.getSystemService(AccessibilityManager::class.java).isTouchExplorationEnabled) {
             throw ReaderFailure("TalkBackなどのタッチガイドを停止してから、自動ページ送りを試してください。", "touch_exploration")
         }
+        var previousNumber: Int? = null
         captureOnce(target).use {
+            previousNumber = it.pageNumber
             if (!it.signature.matches(previous)) {
                 throw ReaderFailure("表示が変わったためページ送りを停止しました。", "page_position_changed")
             }
@@ -79,7 +82,7 @@ internal class WindowPages(
                     val before = fixturePosition(target)
                     checkWindow(target)
                     if (turn.method == TurnMethod.NODE) pageAction(target, right) else gesture(target, right)
-                    val frame = ReaderDiagnostics.measure("page settle") { awaitPage(target, previous) }
+                    val frame = ReaderDiagnostics.measure("page settle") { awaitPage(target, previous, previousNumber, forward) }
                     val after = fixturePosition(target)
                     if (before != null && after != null) {
                         val amount = after - before
@@ -102,15 +105,32 @@ internal class WindowPages(
     private fun fixturePosition(target: ReaderWindow): Int? =
         if (BuildConfig.DEBUG && target.owner == service.packageName) DebugPages.page else null
 
-    private suspend fun awaitPage(target: ReaderWindow, previous: PageSignature): PageFrame {
+    private suspend fun awaitPage(target: ReaderWindow, previous: PageSignature, previousNumber: Int?, forward: Boolean): PageFrame {
         val transition = PageTransition(previous)
+        var numberedCandidate: PageSignature? = null
         repeat(6) {
-            delay(300)
+            delay(if (it == 0) 250 else 300)
             val frame = captureOnce(target)
             val difference = previous.difference(frame.signature)
             ReaderDiagnostics.event("page sample index=${it + 1} relation=${difference.comparison}" +
                 " changedCells=${difference.changedCells} cells=${difference.cells}" +
                 " meanLumaDelta=${difference.meanLumaDelta}")
+            val number = frame.pageNumber
+            if (previousNumber != null && number != null && number != previousNumber) {
+                val expected = previousNumber + if (forward) 1 else -1
+                if (number != expected) {
+                    frame.close()
+                    throw ReaderFailure("ページ番号が期待した移動と一致しません。", "page_number_mismatch")
+                }
+                if (difference.comparison == PageComparison.DIFFERENT) {
+                    val prior = numberedCandidate
+                    if (prior != null && prior.matches(frame.signature)) {
+                        ReaderDiagnostics.event("page turn result=number_and_signature from=$previousNumber to=$number")
+                        return frame
+                    }
+                    numberedCandidate = frame.signature
+                } else numberedCandidate = null
+            } else numberedCandidate = null
             val outcome = transition.observe(frame.signature, difference.comparison)
             if (outcome != PageComparison.UNCERTAIN) {
                 ReaderDiagnostics.event("page turn result=" +
@@ -137,6 +157,12 @@ internal class WindowPages(
                 ReaderDiagnostics.event("capture size=${captured.width}x${captured.height}" +
                     " window_size=${target.bounds.width()}x${target.bounds.height()}")
                 val frame = withContext(Dispatchers.Default) { fingerprint(captured) }
+                checkWindow(target)
+                if (menuControlsVisible()) throw menuFailure()
+                frame.pageNumber = try { pageNumber(frame, target) } catch (error: kotlinx.coroutines.CancellationException) {
+                    throw error
+                } catch (_: Exception) { null }
+                ReaderDiagnostics.event("page_number navigation number=${frame.pageNumber ?: "unknown"}")
                 checkWindow(target)
                 if (menuControlsVisible()) throw menuFailure()
                 retained = true
