@@ -117,6 +117,20 @@ class ReaderAccessibility : AccessibilityService() {
         override fun onReceive(context: Context, intent: Intent) {
             if (!BuildConfig.DEBUG || intent.action != DEBUG_READER_ACTION) return
             val command = intent.getStringExtra("command")
+            if (command == "acquire-status") {
+                scope.launch {
+                    try {
+                        val progress = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                            AcquisitionJournal(noBackupFilesDir.resolve(AcquisitionJournal.NAME)).load()
+                        }
+                        ReaderDiagnostics.event("acquire status saved=${progress?.pages?.size ?: 0}" +
+                            " total=${progress?.total ?: 0} number=${progress?.pages?.lastOrNull()?.number ?: "none"}")
+                    } catch (_: Exception) {
+                        ReaderDiagnostics.event("acquire status result=checkpoint_invalid")
+                    }
+                }
+                return
+            }
             if (command == "acquire-stop") {
                 if (acquisitionActive && mode == Mode.PROBE) stop(pause = false, sync = false)
                 return

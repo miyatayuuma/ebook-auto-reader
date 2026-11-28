@@ -19,6 +19,11 @@ Notification End or the following stops it:
 ```bash
 adb shell am broadcast -a io.github.ebookautoreader.DEBUG_READER -p io.github.ebookautoreader.debug --es command acquire-stop
 ```
-After interruption, manually return to the last logged successfully saved page. Resume with identical first/last and omit reset (do NOT use reset). If exact pixels/model/crop or cache contents differ, stop rather than guess. If interrupted before the first checkpoint, open first page again. No automatic 595-page reverse traversal; return to desired reading start using DMM's own navigation.
+After interruption, query the durable checkpoint (works even without a reader window):
+```bash
+adb shell am broadcast -a io.github.ebookautoreader.DEBUG_READER -p io.github.ebookautoreader.debug --es command acquire-status
+adb logcat -d -s EbookReader:I | grep 'acquire status' | tail -n 1
+```
+Manually return to the checkpoint's last saved page. Resume with identical first/last and omit reset (do NOT use reset). If exact pixels/model/crop or cache contents differ, stop rather than guess. If interrupted before the first checkpoint, open first page again. No automatic 595-page reverse traversal; return to desired reading start using DMM's own navigation.
 
 Strict consecutive *visible* page numbers required. Unnumbered pages, skipped numbers, duplicates, changed windows, OCR/save failures stop; no silent skipping. Actual physical book coverage and OCR accuracy still require human sampling; a sequence 1..596 is not proof of no unnumbered front matter or of exact text. If first/last printed numbers are different from assumed range, choose the correct range. Estimate duration only after short run. The journal is a single trial, not a trusted book identity index; D-2 will handle that separately.

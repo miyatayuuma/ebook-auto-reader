@@ -44,6 +44,8 @@ internal class AcquisitionJournal(file: File) {
             file.failWrite(stream)
             throw error
         }
+        // AtomicFile may report a rename/sync failure without throwing.
+        if (load() != progress) throw ReaderFailure("取得記録を保存できません。", "acquire_checkpoint_write")
     }
     fun clear() = file.delete()
 }
