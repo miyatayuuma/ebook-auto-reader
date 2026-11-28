@@ -60,6 +60,7 @@ class ReaderAccessibility : AccessibilityService() {
     )
     private var warmEngines: WarmEngines? = null
     private var testingTurn = false
+    private var acquisitionActive = false
     private var voiceFallback = false
     private var status = "読み上げ開始を押してください"
     private var lastState: ReaderState? = null
@@ -116,6 +117,10 @@ class ReaderAccessibility : AccessibilityService() {
         override fun onReceive(context: Context, intent: Intent) {
             if (!BuildConfig.DEBUG || intent.action != DEBUG_READER_ACTION) return
             val command = intent.getStringExtra("command")
+            if (command == "acquire-stop") {
+                if (acquisitionActive && mode == Mode.PROBE) stop(pause = false, sync = false)
+                return
+            }
             val target = currentWindow()
             if (target == null || mode != Mode.IDLE) {
                 ReaderDiagnostics.event("diagnostic rejected reason=not_idle_or_no_reader_window")
@@ -124,6 +129,17 @@ class ReaderAccessibility : AccessibilityService() {
             discardWarmEngines()
             when (command) {
                 "capture" -> probe()
+                "acquire" -> {
+                    val first = intent.getIntExtra("first", 1)
+                    val last = intent.getIntExtra("last", 596)
+                    val reset = intent.getBooleanExtra("reset", false)
+                    if (first !in 0..9999 || last !in first..9999 || last - first + 1 > 1000 ||
+                        target.owner != DMM_BOOKS || !hasBookPage(target) || hasReaderMenu(target)) {
+                        ReaderDiagnostics.event("acquire rejected reason=invalid_range_or_not_book_page")
+                        return
+                    }
+                    acquirePages(target, first, last, reset)
+                }
                 "header" -> diagnoseHeader(target, intent.getStringExtra("expected-title"),
                     intent.getIntExtra("expected-number", -1).takeIf { it >= 0 })
                 "page-number" -> {
@@ -530,6 +546,65 @@ class ReaderAccessibility : AccessibilityService() {
         }
     }
 
+    // Debug-only, bounded, explicitly requested acquisition trial. Use the
+    // regular screenshot/OCR path and its fail-closed window/navigation checks.
+    private fun acquirePages(target: ReaderWindow, first: Int, last: Int, reset: Boolean) {
+        val journal = AcquisitionJournal(noBackupFilesDir.resolve(AcquisitionJournal.NAME))
+        val cache = RecognizedPageCache(noBackupFilesDir.resolve(RecognizedPageCache.DIRECTORY_NAME))
+        probeWindow = target
+        acquisitionActive = true
+        change(Mode.PROBE, "本文取得の準備中…", expand = true)
+        operate("acquire") {
+            var engine: OnDeviceOcr? = null
+            try {
+                val existing = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    if (reset) journal.clear()
+                    journal.load()?.also { saved ->
+                        if (saved.first != first || saved.last != last ||
+                            saved.pages.any { cache.get(it.cacheKey) == null }) {
+                            throw ReaderFailure("取得記録またはキャッシュが一致しません。", "acquire_checkpoint_invalid")
+                        }
+                    }
+                } ?: AcquisitionProgress(first, last, emptyList())
+                if (existing.pages.size == existing.total) {
+                    ReaderDiagnostics.event("acquire complete saved=${existing.total} total=${existing.total} already=true")
+                    change(Mode.IDLE, "取得済み ${existing.total}/${existing.total}", expand = true)
+                    return@operate
+                }
+                val created = newOcr(target)
+                engine = created
+                val pages = pagePort(target, created, turnSettings(target))
+                val result = AcquisitionRun(pages,
+                    persist = { frame ->
+                        pages.read(frame)
+                        created.persistedKey((frame as ScreenFrame).bitmap)
+                            ?: throw ReaderFailure("OCR結果を保存できません。", "acquire_cache_write")
+                    },
+                    lookup = { frame -> created.persistedKey((frame as ScreenFrame).bitmap) },
+                    checkpoint = { progress ->
+                        kotlinx.coroutines.withContext(Dispatchers.IO) { journal.save(progress) }
+                        val item = progress.pages.last()
+                        ReaderDiagnostics.event("acquire saved=${progress.pages.size} total=${progress.total} number=${item.number}")
+                        change(Mode.PROBE, "本文取得 ${progress.pages.size}/${progress.total} · 中止は通知の終了")
+                    }).run(existing)
+                ReaderDiagnostics.event("acquire complete saved=${result.pages.size} total=${result.total}")
+                change(Mode.IDLE, "本文取得完了 ${result.pages.size}/${result.total} · 読書開始ページへ手動で戻ってください。", expand = true)
+            } catch (error: CancellationException) {
+                ReaderDiagnostics.event("acquire stopped reason=cancelled")
+                throw error
+            } catch (error: Exception) {
+                val reason = (error as? ReaderFailure)?.reason ?: error.javaClass.simpleName
+                ReaderDiagnostics.event("acquire stopped reason=$reason")
+                change(Mode.IDLE, "本文取得停止 · ${userMessage(error)}", expand = true)
+            } finally {
+                closeEngines(engine)
+                acquisitionActive = false
+                probeWindow = null
+                recordHold(false)
+            }
+        }
+    }
+
     private fun diagnoseHeader(target: ReaderWindow, expectedTitle: String?, expectedNumber: Int?) {
         probeWindow = target
         change(Mode.PROBE, "ヘッダーを認識中…")
@@ -809,6 +884,7 @@ class ReaderAccessibility : AccessibilityService() {
         abortRestore = false
         val previous = job
         val wasProbe = mode == Mode.PROBE
+        val wasAcquisition = acquisitionActive
         val wasTurnTest = testingTurn
         change(Mode.BUSY, "処理を停止中…", expand = true)
         previous?.cancel()
@@ -824,6 +900,7 @@ class ReaderAccessibility : AccessibilityService() {
                 val restoreFailure = session?.restoreFailure?.message
                 clearSession()
                 change(Mode.IDLE, when {
+                    wasAcquisition -> "本文取得を中止しました。取得済みページは保持されています。"
                     !sync -> "対象ウィンドウが変わったため停止しました。"
                     wasTurnTest -> "ページ送り診断を終了しました。現在のページを確認してください。"
                     wasProbe && synchronized -> "画面取得を終了しました。"

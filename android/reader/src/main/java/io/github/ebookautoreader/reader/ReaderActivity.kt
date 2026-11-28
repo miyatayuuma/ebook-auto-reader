@@ -214,7 +214,9 @@ class ReaderActivity : Activity() {
             try {
                 val (result, stats) = withContext(Dispatchers.IO) {
                     val cache = pageCache()
-                    cache.clear() to cache.stats()
+                    val removed = cache.clear()
+                    if (removed != null && removed.failed == 0) AcquisitionJournal(noBackupFilesDir.resolve(AcquisitionJournal.NAME)).clear()
+                    removed to cache.stats()
                 }
                 val message = when {
                     result == null -> "削除結果を確認できません。"
