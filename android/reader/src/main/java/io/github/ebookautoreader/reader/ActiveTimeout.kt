@@ -11,9 +11,12 @@ internal suspend fun <T> withActiveTimeout(
     limitMs: Long,
     blocked: () -> Boolean,
     clock: () -> Long = { System.nanoTime() / 1_000_000 },
+    onDiscard: (T) -> Unit = {},
     action: suspend () -> T,
 ): T = coroutineScope {
-    val work = async { action() }
+    var produced: T? = null
+    var delivered = false
+    val work = async { action().also { produced = it } }
     val timer = async {
         var remaining = limitMs
         var previous = clock()
@@ -29,11 +32,16 @@ internal suspend fun <T> withActiveTimeout(
     }
     try {
         select {
-            work.onAwait { it }
+            work.onAwait { it.also { delivered = true } }
             timer.onAwait { throw ReaderFailure("ページ遷移の確認が時間内に完了しませんでした。", "page_in_transition") }
         }
     } finally {
         work.cancel()
         timer.cancel()
+        // Cleanup a frame completed concurrently with timeout/cancellation.
+        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+            work.join()
+            if (!delivered) produced?.let(onDiscard)
+        }
     }
 }

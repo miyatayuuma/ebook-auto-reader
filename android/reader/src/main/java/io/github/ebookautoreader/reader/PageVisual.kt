@@ -28,6 +28,7 @@ internal class PageSignature(private val cells: ByteArray) {
 
     fun compare(other: PageSignature) = difference(other).comparison
     fun matches(other: PageSignature) = compare(other) == PageComparison.SAME
+    fun identical(other: PageSignature) = cells.isNotEmpty() && cells.contentEquals(other.cells)
 }
 
 internal class PageTransition(private val origin: PageSignature) {

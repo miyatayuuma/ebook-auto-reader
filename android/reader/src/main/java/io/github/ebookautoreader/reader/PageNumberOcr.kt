@@ -39,6 +39,22 @@ internal enum class PageNumberModel(val argument: String) {
     }
 }
 
+internal object PageNumberBounds {
+    fun inBitmap(width: Int, height: Int, window: Rect, screen: Rect): Rect? {
+        if (window.isEmpty || screen.isEmpty) return null
+        val header = Rect(screen.left + floor(screen.width() * .02).toInt(),
+            screen.top + floor(screen.height() * .082).toInt(),
+            screen.left + ceil(screen.width() * .18).toInt(),
+            screen.top + ceil(screen.height() * .11).toInt())
+        if (!window.contains(header)) return null
+        val result = Rect(floor((header.left - window.left).toDouble() * width / window.width()).toInt(),
+            floor((header.top - window.top).toDouble() * height / window.height()).toInt(),
+            ceil((header.right - window.left).toDouble() * width / window.width()).toInt(),
+            ceil((header.bottom - window.top).toDouble() * height / window.height()).toInt())
+        return result.takeIf { !it.isEmpty && it.left >= 0 && it.top >= 0 && it.right <= width && it.bottom <= height }
+    }
+}
+
 internal class PageNumberOcr(model: PageNumberModel) : AutoCloseable {
     private val recognizer = when (model) {
         PageNumberModel.JAPANESE -> TextRecognition.getClient(JapaneseTextRecognizerOptions.Builder().build())
@@ -46,20 +62,11 @@ internal class PageNumberOcr(model: PageNumberModel) : AutoCloseable {
     }
 
     suspend fun read(bitmap: Bitmap, window: Rect, screen: Rect): Int? = withContext(Dispatchers.IO) {
-        // Screenshot pixels are relative to the captured window, not the display.
-        val left = screen.left + floor(screen.width() * 0.02).toInt()
-        val top = screen.top + floor(screen.height() * 0.082).toInt()
-        val right = screen.left + ceil(screen.width() * 0.18).toInt()
-        val bottom = screen.top + ceil(screen.height() * 0.11).toInt()
-        val header = Rect(left, top, right, bottom)
-        if (window.isEmpty || !window.contains(header)) return@withContext null
-        val x1 = floor((header.left - window.left).toDouble() * bitmap.width / window.width()).toInt()
-        val y1 = floor((header.top - window.top).toDouble() * bitmap.height / window.height()).toInt()
-        val x2 = ceil((header.right - window.left).toDouble() * bitmap.width / window.width()).toInt()
-        val y2 = ceil((header.bottom - window.top).toDouble() * bitmap.height / window.height()).toInt()
-        if (x1 < 0 || y1 < 0 || x2 > bitmap.width || y2 > bitmap.height || x1 >= x2 || y1 >= y2) {
-            return@withContext null
-        }
+        val header = PageNumberBounds.inBitmap(bitmap.width, bitmap.height, window, screen) ?: return@withContext null
+        val x1 = header.left
+        val y1 = header.top
+        val x2 = header.right
+        val y2 = header.bottom
         val cropped = Bitmap.createBitmap(bitmap, x1, y1, x2 - x1, y2 - y1)
         val crop = if (cropped === bitmap) bitmap.copy(Bitmap.Config.ARGB_8888, false) else cropped
         suspendCancellableCoroutine { continuation ->

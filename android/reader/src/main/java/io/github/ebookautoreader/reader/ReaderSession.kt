@@ -79,6 +79,7 @@ internal class ReaderSession(
     private var decoded = -1
     private var reachedFailure: ReaderFailure? = null
     private var trusted = true
+    private var interruptedTurn: KnownPage? = null
     var restoreFailure: ReaderFailure? = null
         private set
     private var state = ReaderState()
@@ -337,6 +338,7 @@ internal class ReaderSession(
         known[page.index] = page
         cursor = page
         trusted = true
+        interruptedTurn = null
         if (recent.none(page.signature::matches)) recent.addLast(page.signature)
         if (recent.size > 128) recent.removeFirst()
         update(state.copy(displayed = page.index))
@@ -407,6 +409,7 @@ internal class ReaderSession(
             return requireNotNull(result)
         } catch (error: Throwable) {
             result?.close()
+            if (error is CancellationException && !trusted) interruptedTurn = from
             throw error
         }
     }
@@ -414,8 +417,27 @@ internal class ReaderSession(
     suspend fun restore(): Boolean {
         restoreFailure = null
         if (!trusted) {
-            restoreFailure = reachedFailure
-            return false
+            // Cancellation after a gesture may leave the old or a known adjacent page.
+            // Never guess a new page or retry the interrupted gesture.
+            val origin = interruptedTurn ?: run {
+                restoreFailure = reachedFailure
+                return false
+            }
+            val frame = try { pages.capture() } catch (failure: ReaderFailure) {
+                restoreFailure = failure
+                return false
+            }
+            val verified = frame.use {
+                known.values.filter { page -> kotlin.math.abs(page.index - origin.index) <= 1 &&
+                    frame.signature.matches(page.signature) &&
+                    (page.pageNumber == null || frame.pageNumber == null || page.pageNumber == frame.pageNumber)
+                }.singleOrNull()
+            }
+            if (verified == null) {
+                restoreFailure = ReaderFailure("中断後の位置を確定できません。", "page_position_unknown")
+                return false
+            }
+            register(verified)
         }
         val from = cursor ?: return true
         val target = state.confirmed?.page ?: 0

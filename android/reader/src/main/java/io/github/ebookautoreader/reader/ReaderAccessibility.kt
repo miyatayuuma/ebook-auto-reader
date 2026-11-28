@@ -57,7 +57,7 @@ class ReaderAccessibility : AccessibilityService() {
     private var ocrProgress: OcrProgress? = null
     private var synthesis: TtsStage? = null
     private var preparingPlayback = false
-    private var lastScreenshot = 0L
+    private val screenshotGate = ScreenshotGate(clock = SystemClock::elapsedRealtime)
     private var operationId = 0
     private var registered = false
     private var debugRegistered = false
@@ -66,6 +66,17 @@ class ReaderAccessibility : AccessibilityService() {
     private val pageNumberAttempts = mutableMapOf<PageNumberModel, Int>()
     private var commandPending = false
     private var holdEpoch = 0L
+    private var pageHold = false
+
+    private fun recordHold(blocked: Boolean) {
+        if (blocked && !pageHold) {
+            holdEpoch++
+            ReaderDiagnostics.event("page operations held")
+        } else if (!blocked && pageHold) {
+            ReaderDiagnostics.event("page operations resumed; verification required")
+        }
+        pageHold = blocked
+    }
     private var restoring = false
     private var abortRestore = false
 
@@ -180,6 +191,8 @@ class ReaderAccessibility : AccessibilityService() {
     }
 
     private fun refreshWindow(confirmLoss: Boolean = false) {
+        val boundWindow = probeWindow ?: sessionWindow
+        if (boundWindow != null) recordHold(pageOperationsBlocked(boundWindow)) else recordHold(false)
         if (power.isInteractive && !lockScreen.isKeyguardLocked && shadeVisible()) {
             handler.removeCallbacks(confirmWindowLoss)
             targetMissing = false
@@ -205,9 +218,9 @@ class ReaderAccessibility : AccessibilityService() {
     internal fun controlCommand(command: ControlCommand) {
         if (commandPending) return
         if (!commandAllowed(mode.name, command)) return
-        if (mode == Mode.BUSY && command == ControlCommand.END && restoring) {
+        if (mode == Mode.BUSY && command == ControlCommand.END) {
             abortRestore = true
-            status = "復元を中止しています。"
+            status = "位置復元を中止しています。"
             render()
             return
         }
@@ -249,23 +262,18 @@ class ReaderAccessibility : AccessibilityService() {
             (shadeVisible() || (currentWindow() == target && hasReaderMenu(target)))
 
     private suspend fun awaitReaderWindow(target: ReaderWindow) {
-        var held = false
         while (true) {
             if (!power.isInteractive || lockScreen.isKeyguardLocked) {
                 throw ReaderFailure("画面がロックされたため停止しました。", "window_changed")
             }
             if (restoring && abortRestore) throw ReaderFailure("位置復元を中止しました。", "restore_cancelled")
-            if (pageOperationsBlocked(target)) {
-                if (!held) {
-                    holdEpoch++
-                    ReaderDiagnostics.event("page operations held")
-                }
-                held = true
+            val blocked = pageOperationsBlocked(target)
+            recordHold(blocked)
+            if (blocked) {
                 delay(100)
                 continue
             }
             if (currentWindow() != target) throw ReaderFailure("対象のウィンドウが変わりました。", "window_changed")
-            if (held) ReaderDiagnostics.event("page operations resumed; verification required")
             return
         }
     }
@@ -312,7 +320,8 @@ class ReaderAccessibility : AccessibilityService() {
     ): WindowPages = WindowPages(
             this, { currentWindow()?.takeIf { it == target } }, ::awaitReaderWindow,
             { _, send -> awaitReaderWindow(target); send() },
-            { hasReaderMenu(target) }, ::awaitScreenshotSlot, { pageOperationsBlocked(target) }, { holdEpoch }, settings,
+            { hasReaderMenu(target) }, screenshotGate, { manager.maximumWindowMetrics.bounds },
+            { pageOperationsBlocked(target) }, { holdEpoch }, settings,
             { frame, window ->
                 pageNumberOcr.getOrPut(PageNumberModel.JAPANESE) { PageNumberOcr(PageNumberModel.JAPANESE) }
                     .read(frame.bitmap, window.bounds, manager.maximumWindowMetrics.bounds)
@@ -369,12 +378,6 @@ class ReaderAccessibility : AccessibilityService() {
             for (index in 0 until node.childCount) node.getChild(index)?.let(pending::addLast)
         }
         return false
-    }
-
-    private suspend fun awaitScreenshotSlot() {
-        val remaining = 420 - (SystemClock.elapsedRealtime() - lastScreenshot)
-        if (remaining > 0) delay(remaining)
-        lastScreenshot = SystemClock.elapsedRealtime()
     }
 
     private fun probe() {
@@ -601,8 +604,8 @@ class ReaderAccessibility : AccessibilityService() {
         val target = sessionWindow ?: return false
         change(Mode.BUSY, "読み上げ位置のページに復元中…", expand = true)
         restoring = true
-        abortRestore = false
         return try {
+            if (abortRestore) return false
             awaitReaderWindow(target)
             ReaderDiagnostics.measure("restore") { current.restore() }.also {
                 val failure = current.restoreFailure
@@ -619,6 +622,7 @@ class ReaderAccessibility : AccessibilityService() {
 
     private fun stop(pause: Boolean, sync: Boolean = true) {
         if (mode == Mode.IDLE || mode == Mode.BUSY) return
+        abortRestore = false
         val previous = job
         val wasProbe = mode == Mode.PROBE
         val wasTurnTest = testingTurn
@@ -629,7 +633,7 @@ class ReaderAccessibility : AccessibilityService() {
                 change(Mode.BUSY, "OCRなどの処理が終了するのを待っています。", expand = true)
                 previous.join()
             }
-            val synchronized = sync && (wasProbe && session == null || restore())
+            val synchronized = sync && !abortRestore && (wasProbe && session == null || restore())
             if (pause && synchronized && session != null) {
                 change(Mode.PAUSED, "一時停止 · 文頭から再開", expand = true)
             } else {
@@ -650,6 +654,8 @@ class ReaderAccessibility : AccessibilityService() {
     private fun clearSession() {
         session = null
         sessionWindow = null
+        abortRestore = false
+        recordHold(false)
         val closedOcr = ocr
         val closedSpeech = speech
         ocr = null
