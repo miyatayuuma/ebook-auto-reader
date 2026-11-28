@@ -64,6 +64,7 @@ internal class ReaderSession(
     }
 
     private data class KnownPage(val index: Int, val signature: PageSignature)
+    private data class CapturedPage(val index: Int, val frame: PageFrame)
     private class Pending(val unit: ReadingUnit, var clip: ReaderClip? = null)
 
     // Both producer coroutines and playback own this state on the caller's dispatcher.
@@ -72,6 +73,10 @@ internal class ReaderSession(
     private val known = mutableMapOf<Int, KnownPage>()
     private val recent = ArrayDeque<PageSignature>()
     private val pending = ArrayDeque<Pending>()
+    private val frames = ArrayDeque<CapturedPage>()
+    private var readingFrame = false
+    private var captured = -1
+    private var captureFinished = false
     private val changes = MutableStateFlow(0L)
     private var cursor: KnownPage? = null
     private var decoded = -1
@@ -101,12 +106,17 @@ internal class ReaderSession(
                 val resuming = cursor != null
                 verifyOrStart()
                 launch { producePages() }
+                launch { produceText() }
                 launch { produceAudio() }
                 consume(initialBuffer = !resuming && startupBufferMs > 0)
             }
         } finally {
             // Structured cancellation has joined both workers, including any dispatched turn.
             // Keep the source units for replay, and release every prepared player and WAV.
+            frames.forEach { it.frame.close() }
+            frames.clear()
+            captured = decoded
+            captureFinished = false
             pending.forEach { entry ->
                 entry.clip?.close()
                 entry.clip = null
@@ -126,14 +136,14 @@ internal class ReaderSession(
                 val current = pending.firstOrNull()
                 val clip = current?.clip
                 if (clip == null) {
-                    if (current == null && !sentences.hasUnit()) reachedFailure?.let { throw it }
+                    if (current == null && !sentences.hasUnit() && captureFinished && !readingFrame && frames.isEmpty()) reachedFailure?.let { throw it }
                     update(state.copy(playing = null, stage = ReaderStage.NEXT))
                     if (lastEnd != null) starvations++
                     val waitStarted = clock()
                     try {
                         changes.first {
                             pending.firstOrNull()?.clip != null ||
-                                (reachedFailure != null && pending.isEmpty() && !sentences.hasUnit())
+                                (reachedFailure != null && captureFinished && !readingFrame && frames.isEmpty() && pending.isEmpty() && !sentences.hasUnit())
                         }
                     } finally {
                         if (lastEnd != null) {
@@ -184,20 +194,20 @@ internal class ReaderSession(
 
     private suspend fun producePages() {
         var lastCheck = clock()
-        while (true) {
-            val version = changes.value
-            val from = state.confirmed?.page ?: 0
-            val limit = from + AHEAD_PAGES
-            val visible = requireNotNull(cursor).index
-            try {
+        try {
+            while (true) {
+                val version = changes.value
+                val from = state.confirmed?.page ?: 0
+                val limit = from + AHEAD_PAGES
+                val visible = requireNotNull(cursor).index
                 when {
-                    visible < from -> {
+                    reachedFailure != null -> return
+                    visible < captured -> {
                         move(forward = true, target = visible + 1).close()
                         lastCheck = clock()
                     }
-                    reachedFailure != null -> return
-                    decoded < limit && availableMs() < BUFFER_TARGET_MS && clipCount() < MAX_CLIPS -> {
-                        loadNext()
+                    captured < limit && frames.size + (if (readingFrame) 1 else 0) < 2 -> {
+                        captureNext()
                         lastCheck = clock()
                     }
                     decoded >= limit && pending.isEmpty() && !sentences.hasUnit() -> {
@@ -213,13 +223,43 @@ internal class ReaderSession(
                     }
                     else -> changes.first { it != version }
                 }
+            }
+        } catch (failure: ReaderFailure) {
+            reachedFailure = failure
+            log("prefetch stopped reason=${failure.reason}")
+            if (!trusted) throw failure
+        } finally {
+            captureFinished = true
+            update(state)
+        }
+    }
+
+    private suspend fun produceText() {
+        while (true) {
+            val version = changes.value
+            val item = frames.removeFirstOrNull()
+            if (item == null) {
+                if (captureFinished) {
+                    if (reachedFailure?.reason == "page_unchanged") sentences.flush()
+                    update(state)
+                    return
+                }
+                changes.first { it != version }
+                continue
+            }
+            readingFrame = true
+            update(state)
+            try {
+                item.frame.use { decode(it, item.index) }
             } catch (failure: ReaderFailure) {
                 reachedFailure = failure
-                log("prefetch stopped reason=${failure.reason}")
-                if (!trusted) throw failure
-                if (failure.reason == "page_unchanged") sentences.flush()
+                frames.forEach { it.frame.close() }
+                frames.clear()
                 update(state)
                 return
+            } finally {
+                readingFrame = false
+                update(state)
             }
         }
     }
@@ -251,34 +291,35 @@ internal class ReaderSession(
 
     private suspend fun verifyOrStart() {
         if (!trusted) throw ReaderFailure("表示位置を確認できません。読書ページを開き直してください。")
+        captureFinished = false
         if (cursor == null) {
             update(state.copy(stage = ReaderStage.CAPTURE))
-            pages.capture().use { frame ->
-                register(KnownPage(0, frame.signature))
-                decode(frame, 0)
-            }
+            val frame = pages.capture()
+            register(KnownPage(0, frame.signature))
+            frames.addLast(CapturedPage(0, frame))
+            captured = 0
+            update(state)
         } else {
-            val displayed = requireNotNull(cursor)
             update(state.copy(stage = ReaderStage.CAPTURE))
-            checkedCapture(displayed).use { frame ->
-                if (decoded < 0) decode(frame, displayed.index)
-            }
+            checkedCapture(requireNotNull(cursor)).close()
         }
     }
 
-    private suspend fun loadNext() {
-        val target = decoded + 1
-        var displayed = requireNotNull(cursor)
-        while (displayed.index < decoded) {
-            move(forward = true, target = displayed.index + 1).close()
-            displayed = requireNotNull(cursor)
-        }
+    private suspend fun captureNext() {
+        val target = captured + 1
+        val displayed = requireNotNull(cursor)
         if (state.playing == null) update(state.copy(stage = ReaderStage.CAPTURE))
         val frame = if (displayed.index == target) checkedCapture(displayed) else {
-            check(displayed.index == decoded)
+            check(displayed.index == captured)
             move(forward = true, target = target)
         }
-        frame.use { decode(it, target) }
+        if (reachedFailure != null) {
+            frame.close()
+            return
+        }
+        frames.addLast(CapturedPage(target, frame))
+        captured = target
+        update(state)
     }
 
     private suspend fun decode(frame: PageFrame, index: Int) {
