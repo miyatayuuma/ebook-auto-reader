@@ -28,7 +28,7 @@ class TurnService : AccessibilityService() {
     private var target:Target?=null
     private var readerId:Int?=null
     private var blocked=false
-        private var playing=false
+    private var playing=false
     private var registered=false
     private var generation=0
     private var captureAt=0L
@@ -42,6 +42,10 @@ class TurnService : AccessibilityService() {
     private var lastVerify:PageFeatures?=null
     private var shadeHold=false
     private var waitExtra=false
+    private var manualSync=false
+    private var lastContentProbe=0L
+    private var resyncCandidate:PageFeatures?=null
+    private val contentProbe=Runnable { inspectManualChange() }
     private var earliestTurn=0L
     private val renewWake=object:Runnable { override fun run(){
         val lock=wake?:return
@@ -126,6 +130,9 @@ class TurnService : AccessibilityService() {
             if(name==READER) readerId=event.windowId
             else if(name?.endsWith("Activity")==true) readerId=null
         }
+        if(event.eventType==AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED && event.packageName?.toString()==DMM && phase==Phase.READING && now()-lastContentProbe>=650 && !h.hasCallbacks(contentProbe)){
+            h.postDelayed(contentProbe,180)
+        }
         if(event.eventType!=AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || event.packageName?.toString()==DMM){
             if(!h.hasCallbacks(refresh))h.post(refresh)
         }
@@ -176,8 +183,8 @@ class TurnService : AccessibilityService() {
     internal fun emergencyStop(){ halt("emergency_stop",true) }
     private fun halt(reason:String,latch:Boolean){
         if(latch)blocked=true
-        generation++; h.removeCallbacks(evaluation); h.removeCallbacks(renewWake); phase=Phase.IDLE
-        target=null; baseline=null; lastVerify=null; shadeHold=false
+        generation++; h.removeCallbacks(evaluation); h.removeCallbacks(contentProbe); h.removeCallbacks(renewWake); phase=Phase.IDLE
+        target=null; baseline=null; lastVerify=null; shadeHold=false; manualSync=false; resyncCandidate=null
         wake?.let { if(it.isHeld)runCatching{it.release()} }; wake=null
         notifications.cancel(1); log("stop reason=$reason turns=$turns blocked=$blocked")
     }
@@ -202,7 +209,7 @@ class TurnService : AccessibilityService() {
         phase=Phase.CHECK
         capture { frame ->
             val old=baseline?:return@capture halt("no_baseline",true)
-            if(!old.same(frame))return@capture halt("external_page_change",true)
+            if(!old.same(frame))return@capture beginManualSync(frame)
             val fresh=syncAudio()?:return@capture halt("audio_unavailable",true)
             if(fresh!=playing){playing=fresh;timing.audio(now(),fresh)}
             if(playing||timing.due(now())!=due){phase=Phase.READING;schedule();return@capture}
@@ -222,27 +229,23 @@ class TurnService : AccessibilityService() {
         if(!valid())return
         val state=syncAudio()?:return halt("audio_unavailable",true)
         if(state){playing=true;timing.audio(now(),true);phase=Phase.READING;schedule();return}
-        phase=Phase.TURN;timing.reset(now(),false);playing=false;waitExtra=false;earliestTurn=0
+        phase=Phase.TURN;timing.reset(now(),false,1200);playing=false;waitExtra=false;earliestTurn=0;manualSync=false
         val p=prefs?:return halt("no_prefs",true)
         val b=t.bounds
         fun x(f:Float)=b.left+b.width()*f
         fun y(f:Float)=b.top+b.height()*f
         val builder=GestureDescription.Builder().setDisplayId(Display.DEFAULT_DISPLAY)
-        if(p.twoFinger){
-            for(f in listOf(.43f,.57f)){
-                val path=Path().apply{moveTo(x(if(p.left).22f else .78f),y(f));lineTo(x(if(p.left).78f else .22f),y(f))}
-                builder.addStroke(GestureDescription.StrokeDescription(path,0,300))
-            }
-        }else{
-            val path=Path().apply{moveTo(x(if(p.left).0926f else .9074f),y(.95f))}
-            builder.addStroke(GestureDescription.StrokeDescription(path,0,70))
+        for(f in listOf(.43f,.57f)){
+            val path=Path().apply{moveTo(x(if(p.left).22f else .78f),y(f));lineTo(x(if(p.left).78f else .22f),y(f))}
+            builder.addStroke(GestureDescription.StrokeDescription(path,0,120))
         }
+        log("gesture_start swipe=${if(p.left)"right" else "left"} duration=120")
         val g=generation
         val accepted=dispatchGesture(builder.build(),object:GestureResultCallback(){
             override fun onCompleted(gestureDescription:GestureDescription?){
                 if(g!=generation)return
                 phase=Phase.VERIFY;verifyDeadline=now()+4500;lastVerify=null
-                log("gesture_completed"); h.postDelayed({verify(g)},450)
+                log("gesture_completed"); h.postDelayed({verify(g)},260)
             }
             override fun onCancelled(gestureDescription:GestureDescription?){if(g==generation)halt("gesture_cancelled",true)}
         },h)
@@ -261,10 +264,51 @@ class TurnService : AccessibilityService() {
                 baseline=frame;turns++;phase=Phase.READING
                 // Keep any speech onset/stop that occurred during transition.
                 // If none started, start the 1.5s wait from verified stable page.
-                if(!timing.seen)timing.reset(now(),playing)
+                if(!timing.seen)timing.reset(now(),playing,1200)
                 earliestTurn=now()+100
                 log("page_verified count=$turns audio=$playing"); schedule()
-            }else{lastVerify=frame;h.postDelayed({verify(g)},450)}
+            }else{lastVerify=frame;h.postDelayed({verify(g)},260)}
+        }
+    }
+    private fun inspectManualChange(){
+        if(phase!=Phase.READING || !valid())return
+        lastContentProbe=now()
+        phase=Phase.CHECK;h.removeCallbacks(evaluation)
+        capture { frame ->
+            val old=baseline?:return@capture halt("no_baseline",true)
+            if(!old.same(frame))beginManualSync(frame) else {phase=Phase.READING;schedule()}
+        }
+    }
+    private fun beginManualSync(frame:PageFeatures){
+        manualSync=true
+        phase=Phase.VERIFY
+        resyncCandidate=frame
+        verifyDeadline=now()+4500
+        // Ignore the old page's completed speech. Observe speech on the new
+        // page, including any start/stop while its screenshot stabilizes.
+        val p=prefs?:return halt("no_prefs",true)
+        val state=syncAudio()?:return halt("audio_unavailable",true)
+        playing=state;timing=Timing(p.gap,p.noSpeech)
+        timing.reset(now(),state,1200)
+        waitExtra=false;consecutiveImages=0
+        log("manual_page_change resync audio=$state")
+        val g=generation;h.postDelayed({verifyManual(g)},260)
+    }
+    private fun verifyManual(g:Int){
+        if(g!=generation||phase!=Phase.VERIFY||!manualSync||!valid())return
+        if(now()>verifyDeadline)return halt("manual_page_unstable",true)
+        capture { frame ->
+            val previous=resyncCandidate
+            if(previous!=null&&previous.same(frame)){
+                baseline=frame;resyncCandidate=null;manualSync=false;phase=Phase.READING
+                if(!timing.seen)timing.reset(now(),playing,1200)
+                earliestTurn=now()+100
+                log("manual_page_resynced audio=$playing");schedule()
+            }else{
+                resyncCandidate=frame
+                timing.reset(now(),playing,1200)
+                h.postDelayed({verifyManual(g)},260)
+            }
         }
     }
     private fun capture(done:(PageFeatures)->Unit){
