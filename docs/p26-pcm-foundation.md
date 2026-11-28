@@ -1,0 +1,5 @@
+# P2.6A1a — PCM ingress and playback accounting
+
+First independently testable implementation slice of P2.6A. PcmWaveReader validates RIFF length, chunk padding, PCM format, byte rate and frame alignment; rejects unsupported/corrupt formats. PlaybackLedger maps explicitly planned source-unit spans to accepted and actually played frames; starts/completions occur on head observations, not on submission. Epoch mismatch is discarded; impossible/reset head is a failure; 32-bit rollover handled within bounded polling intervals. All access is single-owner. New epoch required on stop/flush or track recreation; prefix is source-less. This module does not create AudioTrack or change DeviceAudio yet.
+
+A1b: one AudioTrack streaming sink with bounded nonblocking writes, matching PCM format, figure-notice normalization, speed/pitch and route handling. A2: session integration with eligible-unit authorization before queueing and ledger events; preserve pause/restore, first-audio behavior, and EYES gate. No claim of audible continuity until A2 and actual Pixel acceptance.
