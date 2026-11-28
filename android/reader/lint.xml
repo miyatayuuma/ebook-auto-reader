@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- This existing programmatic overlay uses the platform theme, not AppCompat. -->
+    <issue id="AppCompatCustomView">
+        <ignore path="src/main/java/io/github/ebookautoreader/reader/FloatingControls.kt" />
+    </issue>
+</lint>
