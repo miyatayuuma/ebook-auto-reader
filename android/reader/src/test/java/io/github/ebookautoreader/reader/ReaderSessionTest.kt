@@ -339,6 +339,59 @@ class ReaderSessionTest {
         assertEquals(pages.frames, pages.closedFrames)
     }
 
+    @Test
+    fun eyesReturnsBeforeOcrCompletesAndDoesNotStartAudioOnPrefetchedPage() = runTest {
+        val pages = FakePages((0..5).map { body("本文${it}です。") }).apply { readDelay = 1_000 }
+        val audio = FakeAudio()
+        val shownAtStart = mutableListOf<Int>()
+        audio.onStart = { shownAtStart += pages.display }
+        val session = ReaderSession(pages, audio, Pronunciations(), {},
+            clock = { testScheduler.currentTime }, readingMode = ReadingMode.EYES)
+        val work = async { session.run() }
+        advanceTimeBy(500)
+        assertTrue(pages.decoded.isEmpty())
+        assertEquals(0, pages.display)
+        assertEquals(listOf(true, true, false, false), pages.turns)
+        advanceTimeBy(750)
+        assertEquals(listOf("本文0です。"), audio.starts)
+        assertEquals(listOf(0), shownAtStart)
+        work.cancelAndJoin()
+        assertTrue(session.restore())
+        assertEquals(pages.frames, pages.closedFrames)
+        assertEquals(audio.clips.size, audio.closedClips)
+    }
+
+    @Test
+    fun eyesDrainsKnownPagesInOrderEvenAfterLastCaptureFails() = runTest {
+        val expected = (0..3).map { "本文${it}です。" }
+        val pages = FakePages(expected.map { body(it) })
+        val audio = FakeAudio()
+        val displayed = mutableListOf<Int>()
+        audio.onStart = { displayed += pages.display }
+        val session = ReaderSession(pages, audio, Pronunciations(), {},
+            clock = { testScheduler.currentTime }, readingMode = ReadingMode.EYES)
+        val outcome = runCatching { session.run() }
+        assertEquals("page_unchanged", (outcome.exceptionOrNull() as? ReaderFailure)?.reason)
+        assertEquals(expected, audio.starts)
+        assertEquals(listOf(0, 1, 2, 3), displayed)
+        assertEquals(listOf(0, 1, 2, 3), pages.decoded)
+        assertTrue(session.restore())
+        assertEquals(pages.frames, pages.closedFrames)
+    }
+
+    @Test
+    fun eyesKeepsCrossPageSentenceIntactAndStartsNextClipOnItsPage() = runTest {
+        val pages = FakePages(listOf(body("川岸の石は"), body("光った。鳥です。"), body("夜です。")))
+        val audio = FakeAudio()
+        val displayed = mutableListOf<Int>()
+        audio.onStart = { displayed += pages.display }
+        val session = ReaderSession(pages, audio, Pronunciations(), {},
+            clock = { testScheduler.currentTime }, readingMode = ReadingMode.EYES)
+        assertTrue(runCatching { session.run() }.isFailure)
+        assertEquals(listOf("川岸の石は光った。", "鳥です。", "夜です。"), audio.starts)
+        assertEquals(listOf(0, 1, 2), displayed)
+    }
+
     private fun body(vararg lines: String) = PageText(lines.map { SourceLine(it) }, PageKind.BODY)
 
     private class FakePages(private val pages: List<PageText>,
@@ -395,6 +448,7 @@ class ReaderSessionTest {
         val starts = mutableListOf<String>()
         var closedClips = 0
         var slowText: String? = null
+        var onStart: (() -> Unit)? = null
         var clipDuration = 1_000
         override var rate = 1f
         private inner class Clip(val unit: ReadingUnit) : ReaderClip {
@@ -412,6 +466,7 @@ class ReaderSessionTest {
         override suspend fun play(audio: ReaderClip, started: () -> Unit, progress: (Int) -> Unit) {
             val unit = (audio as Clip).unit
             started()
+            onStart?.invoke()
             starts += if (unit.noticePage != null) "[図表]" else unit.spoken
             repeat(10) {
                 delay(100)

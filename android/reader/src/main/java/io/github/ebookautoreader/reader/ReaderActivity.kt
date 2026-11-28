@@ -149,7 +149,7 @@ class ReaderActivity : Activity() {
     }
 
     private fun readingModeDescription(mode: ReadingMode): String =
-        "${mode.description}\n次回の読書開始時に適用します（開発中：表示制御は次工程で有効化）。"
+        "${mode.description}\n次回の読書開始時に適用します。"
 
     private fun showReadingMode(mode: ReadingMode) {
         modeIds[mode]?.let { id ->
