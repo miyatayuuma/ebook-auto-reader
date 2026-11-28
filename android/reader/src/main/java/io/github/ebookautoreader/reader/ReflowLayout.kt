@@ -111,7 +111,8 @@ internal object ReflowLayout {
                 // NDLOCR may emit a text-block structure (type 0) around multiple
                 // caption lines separately from the illustration. It is not an
                 // unknown structure if the recognized lines explain its bounds.
-                val captionBlock = region.type == 0 && explainedCaptionBlock(region.box, captions)
+                val captionBlock = region.type == 0 && (explainedCaptionBlock(region.box, captions) ||
+                    (visuals.isNotEmpty() && explainedRaggedCaptionBlock(region.box, captions)))
                 !header && !duplicate && !textDuplicate && !captionBlock
             }
         for (region in regions) {
@@ -197,6 +198,33 @@ internal object ReflowLayout {
         return overlap >= block.area.toLong() * .85 &&
             overlap >= envelope.area.toLong() * .85 &&
             inside.sumOf { block.intersection(it).toLong() } >= block.area.toLong() * .5
+    }
+
+    // A short last line of a horizontal photo caption leaves legitimate
+    // whitespace on the right. Area coverage alone rejects that layout.
+    // Require a tight envelope, aligned line starts, a full-width line and
+    // dense vertical coverage; do not relax unrelated structures or failed text.
+    private fun explainedRaggedCaptionBlock(block: Box, captions: List<Region>): Boolean {
+        if (block.area <= 0) return false
+        val inside = captions.filter { !it.vertical && it.box.area > 0 &&
+            block.intersection(it.box).toLong() >= it.box.area.toLong() * .85 }
+            .map { it.box }.sortedBy { it.top }
+        if (inside.size < 2) return false
+        val envelope = Box(inside.minOf { it.left }, inside.first().top,
+            inside.maxOf { it.right }, inside.maxOf { it.bottom })
+        val overlap = block.intersection(envelope).toLong()
+        if (overlap < block.area.toLong() * .85 || overlap < envelope.area.toLong() * .85) return false
+        val pitch = inside.map { it.height }.sorted()[inside.size / 2].coerceAtLeast(1)
+        if (inside.any { abs(it.left - envelope.left) > pitch * .5 ||
+            it.height < pitch * .6 || it.height > pitch * 1.5 }) return false
+        if (inside.dropLast(1).any { it.width < block.width * .85 }) return false
+        if (inside.zipWithNext().any { (a, b) ->
+                b.top < a.bottom || b.top - a.bottom > pitch * .75
+            }) return false
+        val coveredHeight = inside.sumOf {
+            (minOf(block.bottom, it.bottom) - maxOf(block.top, it.top)).coerceAtLeast(0)
+        }
+        return coveredHeight >= block.height * .75
     }
 
     private fun hasJapanese(text: String) = text.any { it in 'ぁ'..'ヿ' || it in '㐀'..'鿿' }

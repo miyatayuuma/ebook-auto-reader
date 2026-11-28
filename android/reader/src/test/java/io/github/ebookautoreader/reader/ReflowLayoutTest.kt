@@ -177,6 +177,32 @@ class ReflowLayoutTest {
     }
 
     @Test
+    fun photoCaptionWithVeryShortFinalLineIsStillAConfirmedFigure() {
+        // Synthetic wording; geometry reproduces the reported 1080x2424 failure.
+        val photo = Region(Box(80, 330, 1003, 1018), 6, .979f)
+        val block = Region(Box(85, 1034, 997, 1121), 0, .972f)
+        val first = Region(Box(87, 1034, 996, 1069), 2, .935f, "写真の説明です。")
+        val last = Region(Box(87, 1088, 154, 1121), 2, .896f, "続き。")
+        val regions = listOf(photo, block, first, last)
+        val page = ReflowLayout.read(regions, 1080, 2424, false)
+        assertEquals(PageKind.FIGURE, page.kind)
+        assertEquals(listOf(first.text, last.text), page.lines.map { it.original })
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(photo, block, first), 1080, 2424, false)
+        }
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(photo, block, first, last.copy(complete = false)), 1080, 2424, false)
+        }
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(photo, block.copy(box = Box(85, 1034, 997, 1250)), first,
+                last.copy(box = Box(87, 1217, 154, 1250))), 1080, 2424, false)
+        }
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(photo, block, first, last.copy(box = Box(500, 1088, 567, 1121))), 1080, 2424, false)
+        }
+    }
+
+    @Test
     fun enclosingIllustrationAndCaptionNeedsTightExplainedBounds() {
         val image = Region(Box(50, 150, 450, 750), 6, .94f)
         val caption = Region(Box(100, 760, 400, 790), 2, .9f, "図の説明。")
