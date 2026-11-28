@@ -544,7 +544,7 @@ class ReaderAccessibility : AccessibilityService() {
         else 0.0
         // Development-only, local reuse. noBackupFilesDir prevents cloud backup.
         val cache = if (BuildConfig.DEBUG && target.owner == DMM_BOOKS)
-            RecognizedPageCache(noBackupFilesDir.resolve("recognized-pages-v1")) else null
+            RecognizedPageCache(noBackupFilesDir.resolve(RecognizedPageCache.DIRECTORY_NAME)) else null
         val createdOcr = OnDeviceOcr(filesDir.resolve("ndl"), bodyTopFraction, cache).also { ocr = it }
         val createdSpeech = DeviceSpeech(this).also { speech = it }
         val audio = DeviceAudio(this, createdSpeech, preferences, reportSynthesis = {

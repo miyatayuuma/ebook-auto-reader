@@ -113,6 +113,7 @@ internal class OnDeviceOcr(
                 }) {
                     nativeOcr.withLock {
                         val lookupStart = SystemClock.elapsedRealtime()
+                        val cacheGeneration = pageCache?.generation()
                         val key = cacheKey(image, bodyTop)
                         val cached = key?.let { pageCache?.get(it) }
                         if (cached != null) {
@@ -128,7 +129,7 @@ internal class OnDeviceOcr(
                                 uniformLight || (body !== image && isUniformLight(body)), cancellation,
                                 { classification = it }, { regionDetails += it }) { updates.value = it }
                             if (key != null) {
-                                val stored = pageCache?.put(key, page) == true
+                                val stored = pageCache?.put(key, page, cacheGeneration) == true
                                 ReaderDiagnostics.event("ocr cache store success=$stored kind=${page.kind} lines=${page.lines.size}")
                             }
                             page

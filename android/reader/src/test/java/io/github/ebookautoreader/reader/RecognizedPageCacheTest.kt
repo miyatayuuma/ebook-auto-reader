@@ -28,6 +28,48 @@ class RecognizedPageCacheTest {
         assertNull(RecognizedPageCache(dir).get(key(pixel = 2)))
     }
 
+    @Test fun statsAndClearOnlyManageCacheFiles() {
+        val dir = folder.newFolder()
+        val writer = RecognizedPageCache(dir)
+        val ui = RecognizedPageCache(dir)
+        val page = PageText(emptyList(), PageKind.BLANK)
+        assertEquals(PageCacheStats(0, 0, 0), ui.stats())
+        assertTrue(writer.put(key(), page))
+        assertTrue(writer.put(key(pixel = 2), page))
+        dir.resolve("page-orphan.tmp").writeText("temporary")
+        dir.resolve("unrelated.txt").writeText("keep")
+        val expectedBytes = dir.listFiles()!!.filter { it.name != "unrelated.txt" }.sumOf { it.length() }
+        assertEquals(PageCacheStats(2, expectedBytes, 1), ui.stats())
+        assertEquals(PageCacheClear(3, 0), ui.clear())
+        assertEquals(PageCacheStats(0, 0, 0), writer.stats())
+        assertNull(writer.get(key()))
+        assertTrue(dir.resolve("unrelated.txt").isFile)
+    }
+
+    @Test fun clearRejectsInFlightWritesAcrossInstances() {
+        val dir = folder.newFolder()
+        val writer = RecognizedPageCache(dir)
+        val ui = RecognizedPageCache(dir)
+        val page = PageText(emptyList(), PageKind.BLANK)
+        val before = writer.generation()
+        assertEquals(PageCacheClear(0, 0), ui.clear())
+        assertFalse(writer.put(key(), page, before))
+        assertNull(writer.get(key()))
+        assertTrue(writer.put(key(), page, writer.generation()))
+        assertEquals(page, ui.get(key()))
+    }
+
+    @Test fun missingDirectoryAndInvalidStorageAreDistinguished() {
+        val dir = folder.newFolder().resolve("not-created")
+        val cache = RecognizedPageCache(dir)
+        assertEquals(PageCacheStats(0, 0, 0), cache.stats())
+        assertEquals(PageCacheClear(0, 0), cache.clear())
+        dir.writeText("not a directory")
+        assertNull(cache.stats())
+        assertNull(cache.clear())
+        assertTrue(dir.isFile)
+    }
+
     @Test fun corruptAndInvalidRecordsAreMisses() {
         val dir = folder.newFolder()
         val cache = RecognizedPageCache(dir)

@@ -24,19 +24,61 @@ internal object PageCacheKey {
  * titles or exported text. Exact full-frame keys prevent a page-number-only hit.
  * Corruption, unsupported versions and storage failures are ordinary misses.
  */
+internal data class PageCacheStats(val pages: Int, val bytes: Long, val temporaryFiles: Int)
+internal data class PageCacheClear(val removed: Int, val failed: Int)
+
 internal class RecognizedPageCache(private val directory: File) {
-    private companion object {
-        const val MAGIC = 0x45525031
-        const val MAX_BYTES = 2 * 1024 * 1024
-        const val MAX_LINES = 4096
-        const val MAX_RUBY = 4096
-        val KEY = Regex("[0-9a-f]{64}")
+    companion object {
+        const val DIRECTORY_NAME = "recognized-pages-v1"
+        // UI and OCR create separate instances in the same process.
+        private val lock = Any()
+        private var epoch = 0L
+        private const val MAGIC = 0x45525031
+        private const val MAX_BYTES = 2 * 1024 * 1024
+        private const val MAX_LINES = 4096
+        private const val MAX_RUBY = 4096
+        private val KEY = Regex("[0-9a-f]{64}")
     }
 
     private fun file(key: String): File? = if (KEY.matches(key)) directory.resolve("$key.page") else null
 
-    @Synchronized
-    fun get(key: String): PageText? {
+    private fun storedFiles(): List<File>? {
+        if (!directory.exists()) return emptyList()
+        return directory.listFiles()?.filter { file ->
+            file.isFile && (file.name.endsWith(".page") && KEY.matches(file.name.removeSuffix(".page")) ||
+                file.name.startsWith("page-") && file.name.endsWith(".tmp"))
+        }
+    }
+
+    fun generation(): Long = synchronized(lock) { epoch }
+
+    fun stats(): PageCacheStats? = synchronized(lock) {
+        try {
+            storedFiles()?.let { files ->
+                PageCacheStats(files.count { it.name.endsWith(".page") },
+                    files.sumOf { it.length() }, files.count { it.name.endsWith(".tmp") })
+            }
+        } catch (_: SecurityException) { null }
+    }
+
+    fun clear(): PageCacheClear? = synchronized(lock) {
+        // Invalidate writes from OCR that started before this clear.
+        epoch++
+        try {
+            storedFiles()?.let { files ->
+                var removed = 0
+                var failed = 0
+                for (file in files) {
+                    if (file.delete()) removed++ else failed++
+                }
+                PageCacheClear(removed, failed)
+            }
+        } catch (_: SecurityException) { null }
+    }
+
+    fun get(key: String): PageText? = synchronized(lock) { readLocked(key) }
+
+    private fun readLocked(key: String): PageText? {
         val file = file(key) ?: return null
         if (!file.isFile) return null
         return try {
@@ -77,8 +119,12 @@ internal class RecognizedPageCache(private val directory: File) {
         catch (_: SecurityException) { null }
     }
 
-    @Synchronized
-    fun put(key: String, page: PageText): Boolean {
+    fun put(key: String, page: PageText, expectedGeneration: Long? = null): Boolean =
+        synchronized(lock) {
+            if (expectedGeneration != null && expectedGeneration != epoch) false else writeLocked(key, page)
+        }
+
+    private fun writeLocked(key: String, page: PageText): Boolean {
         val file = file(key) ?: return false
         if (!valid(page)) return false
         var temp: File? = null

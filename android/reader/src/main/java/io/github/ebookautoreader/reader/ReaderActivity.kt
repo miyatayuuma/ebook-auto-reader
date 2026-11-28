@@ -1,6 +1,7 @@
 package io.github.ebookautoreader.reader
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.Manifest
 import android.content.pm.PackageManager
 import android.content.ComponentName
@@ -43,6 +44,10 @@ class ReaderActivity : Activity() {
     private var names = emptyList<String>()
     private var voiceLoaded = false
     private var task: Job? = null
+    private var cacheTask: Job? = null
+    private var cacheInfo: TextView? = null
+    private var cacheRefresh: Button? = null
+    private var cacheDelete: Button? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -88,6 +93,13 @@ class ReaderActivity : Activity() {
             setText(preferences.bookId())
         }.also(content::addView)
         button(content, "設定を保存") { saveSettings() }
+        if (BuildConfig.DEBUG) {
+            content.addView(text("認識済みページ（開発用）", 21))
+            content.addView(text("端末内に保存したOCR結果です。画像・音声は含みません。", 14))
+            cacheInfo = text("保存件数を確認中…", 15).also(content::addView)
+            cacheRefresh = button(content, "保存件数・容量を更新") { refreshCache() }
+            cacheDelete = button(content, "認識済みページを全削除") { confirmCacheClear() }
+        }
         if (BuildConfig.DEBUG && VoiceDiagnosticRequest.take()) {
             audition(exportSample = true)
             task?.invokeOnCompletion { scope.launch { loadVoices() } }
@@ -96,6 +108,7 @@ class ReaderActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        refreshCache()
         val saved = preferences.speech()
         rate.progress = SpeechRate.progress(saved.rate)
         pitch.progress = (saved.pitch * 100).roundToInt() - 75
@@ -106,6 +119,60 @@ class ReaderActivity : Activity() {
             "DMMブックスで縦書き本文を開き、クイック設定から読み上げを開始してください。"
         } else {
             "アクセシビリティ設定でEbook Auto Readerを有効にしてください。"
+        }
+    }
+
+    private fun pageCache() = RecognizedPageCache(noBackupFilesDir.resolve(RecognizedPageCache.DIRECTORY_NAME))
+
+    private fun cacheSummary(stats: PageCacheStats?): String {
+        if (stats == null) return "保存件数・容量を確認できません。"
+        val size = android.text.format.Formatter.formatFileSize(this, stats.bytes)
+        val temporary = if (stats.temporaryFiles > 0) " · 一時ファイル${stats.temporaryFiles}件" else ""
+        return "保存データ：${stats.pages}件 / $size$temporary"
+    }
+
+    private fun setCacheBusy(busy: Boolean) {
+        cacheRefresh?.isEnabled = !busy
+        cacheDelete?.isEnabled = !busy
+    }
+
+    private fun refreshCache() {
+        if (cacheInfo == null || cacheTask?.isActive == true) return
+        cacheTask = scope.launch {
+            setCacheBusy(true)
+            try {
+                val stats = withContext(Dispatchers.IO) { pageCache().stats() }
+                cacheInfo?.text = cacheSummary(stats)
+            } finally { setCacheBusy(false) }
+        }
+    }
+
+    private fun confirmCacheClear() {
+        if (cacheTask?.isActive == true) return
+        AlertDialog.Builder(this)
+            .setTitle("認識済みページを全削除しますか？")
+            .setMessage("すべての書籍の保存済みOCR結果を削除します。次回の読み上げでは再認識します。発音辞書・音声設定・OCRモデルは削除しません。読書を終了してから実行してください。")
+            .setNegativeButton("キャンセル", null)
+            .setPositiveButton("削除") { _, _ -> clearCache() }
+            .show()
+    }
+
+    private fun clearCache() {
+        if (cacheTask?.isActive == true) return
+        cacheTask = scope.launch {
+            setCacheBusy(true)
+            try {
+                val (result, stats) = withContext(Dispatchers.IO) {
+                    val cache = pageCache()
+                    cache.clear() to cache.stats()
+                }
+                val message = when {
+                    result == null -> "削除結果を確認できません。"
+                    result.failed > 0 -> "${result.removed}件削除・${result.failed}件失敗"
+                    else -> "保存データを削除しました（${result.removed}件）。"
+                }
+                cacheInfo?.text = "$message\n${cacheSummary(stats)}"
+            } finally { setCacheBusy(false) }
         }
     }
 
