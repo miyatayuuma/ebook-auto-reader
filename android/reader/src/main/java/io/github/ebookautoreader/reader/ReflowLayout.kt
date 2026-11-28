@@ -49,7 +49,7 @@ internal object ReflowLayout {
     // infer a header from the vertical position of a heading alone.
     private fun headerBand(regions: List<Region>, width: Int, height: Int): Boolean =
         width > 0 && height > 0 && regions.any {
-            it.type in textTypes && !it.vertical && it.box.left >= width * .02 &&
+            (it.type in textTypes || it.type == 8) && !it.vertical && it.box.left >= width * .02 &&
                 it.box.right <= width * .18 && it.box.top >= height * .082 &&
                 it.box.bottom <= height * .11 && it.box.area > 0
         }

@@ -110,6 +110,7 @@ class ReflowLayoutTest {
         val selected = ReflowLayout.recognitionCandidates(all, 500, 1000)
         assertFalse(folio in selected)
         assertFalse(title in selected)
+        assertFalse(title in ReflowLayout.recognitionCandidates(listOf(folio.copy(type = 8), title), 500, 1000))
         assertTrue(body in selected)
         assertTrue(ruby in selected)
         assertEquals(listOf("本文です。"), ReflowLayout.read(all, 500, 1000, false).lines.map { it.original })
