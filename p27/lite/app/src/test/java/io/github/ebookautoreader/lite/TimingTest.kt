@@ -23,14 +23,23 @@ class TimingTest {
         val t=Timing(800,1500);t.reset(0,true);t.audio(100,false)
         t.reset(200,false);assertEquals(Due.NONE,t.due(1000));assertEquals(Due.NO_SPEECH,t.due(1700))
     }
-    @Test fun imageEvidenceAndTextRejection(){
+    @Test fun silentPagesNeverNeedContentClassification(){
+        val t=Timing(800,1500)
+        repeat(20){ i ->
+            val start=i*2000L
+            t.reset(start,false,1200)
+            assertEquals(Due.NONE,t.due(start+1499))
+            assertEquals(Due.NO_SPEECH,t.due(start+1500))
+        }
+    }
+    @Test fun signatureOnlyChecksChange(){
         val w=PageAnalysis.W;val h=PageAnalysis.H
         val a=IntArray(w*h){-1}
+        val blank=PageAnalysis.analyze(a)
+        assertTrue(blank.same(PageAnalysis.analyze(a)))
         for(y in 80..280)for(x in 40..200)a[y*w+x]=0xff202020.toInt()
-        val image=PageAnalysis.analyze(a);assertTrue(image.image)
-        for(y in 20..25)for(x in listOf(20,40,60))for(dx in 0..4)a[y*w+x+dx]=0xff000000.toInt()
-        assertFalse(PageAnalysis.analyze(a).image)
-        assertFalse(PageAnalysis.analyze(IntArray(w*h){-1}).image)
-        assertTrue(image.same(image))
+        val changed=PageAnalysis.analyze(a)
+        assertFalse(blank.same(changed))
+        assertTrue(blank.distance(changed)>=.015)
     }
 }
