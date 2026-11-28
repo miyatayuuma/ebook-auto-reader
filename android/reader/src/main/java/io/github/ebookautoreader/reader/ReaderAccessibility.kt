@@ -44,6 +44,7 @@ class ReaderAccessibility : AccessibilityService() {
     private val lockScreen by lazy { getSystemService(KeyguardManager::class.java) }
     private val preferences by lazy { ReaderPreferences(this) }
     private var mode = Mode.IDLE
+    private val displayPower by lazy { DisplayPower(this) }
     private var job: Job? = null
     private var session: ReaderSession? = null
     private var sessionWindow: ReaderWindow? = null
@@ -148,6 +149,7 @@ class ReaderAccessibility : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         if (!registered) {
+            displayPower.restore()
             preferences.observe(speechPreferenceChanged)
             registerReceiver(screenState, IntentFilter().apply {
                 addAction(Intent.ACTION_SCREEN_OFF)
@@ -403,6 +405,7 @@ class ReaderAccessibility : AccessibilityService() {
     }
 
     private fun change(next: Mode, message: String, expand: Boolean = false) {
+        if (mode == Mode.READING && next != Mode.READING) displayPower.restore()
         if (mode != next) ReaderDiagnostics.event("mode from=$mode to=$next jobActive=${job?.isActive == true}")
         mode = next
         status = message
@@ -638,6 +641,8 @@ class ReaderAccessibility : AccessibilityService() {
         val settings = turnSettings(target)
         val startedAt = SystemClock.elapsedRealtime()
         sessionWindow = target
+        if ((session?.readingMode ?: preferences.readingMode()) == ReadingMode.EARS &&
+            DisplayPower.enabled(this)) displayPower.dim()
         change(Mode.READING, "準備中…")
         operate("read") {
             try {
@@ -832,6 +837,7 @@ class ReaderAccessibility : AccessibilityService() {
         (error as? ReaderFailure)?.message ?: "読み上げを継続できません。表示と音声設定を確認してください。"
 
     override fun onDestroy() {
+        displayPower.restore()
         handler.removeCallbacksAndMessages(null)
         if (registered) {
             preferences.removeObserver(speechPreferenceChanged)
