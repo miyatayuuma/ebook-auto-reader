@@ -1,18 +1,17 @@
-# P2.5A-UI Pixel 9での確認
+# P2.5 統合版：Pixel 9実機受入
 
-対象はPixel 9／Android 17のGoogle Play版DMMブックスと日本語縦書きリフロー本文です。画像と文字認識結果はセッション中のメモリに置き、合成音声はアプリの一時領域から再生後や停止時に削除します。Androidの画面取得が保護画面または黒画面を返すと停止します。[Androidの画面取得API](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService#takeScreenshotOfWindow(int,java.util.concurrent.Executor,android.accessibilityservice.AccessibilityService.TakeScreenshotCallback))
+対象はPixel 9／Android 17のGoogle Play版DMMブックスと日本語縦書きリフロー本文です。画像は処理後に解放し、合成音声は一時領域から再生後や停止時に削除します。開発用デバッグ版では認識済みページ（原文・ルビ・位置・分類等）を端末のバックアップ対象外の私有領域に保持し、同一画像・モデル・認識条件の再読時に再利用します。保存件数・容量の表示と全削除を設定画面から実行できます。自動期限・恒久保存方針は未決定で、書籍別ページ番号索引も未実装です。Androidの画面取得が保護画面または黒画面を返すと停止します。[Androidの画面取得API](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService#takeScreenshotOfWindow(int,java.util.concurrent.Executor,android.accessibilityservice.AccessibilityService.TakeScreenshotCallback))
 
 ## APK更新
 
-管理PCの既存チェックアウトを更新し、P2 Readerの成功したActions実行番号を指定します。
+管理PCの既存チェックアウトを更新し、受入対象のソースSHAと成功済みP2 ReaderのActions実行番号を固定します。受入対象は `5e826ac49db05ad9cc911f37ece221dc325646c2`、[P2 Reader CI](https://github.com/miyatayuuma/ebook-auto-reader/actions/runs/46124278499)、[APK artifact](https://github.com/miyatayuuma/ebook-auto-reader/actions/runs/46124278499/artifacts/15255001924) です。P1 Labも成功済みです。今回、APKの内部versionNameは旧来の `p2.5c2-crop2` のままなので、SHAとActions実行番号で識別してください。
 
 ```bash
 cd ~/ebook-auto-reader
-git fetch origin p25/controls
-git switch --detach origin/p25/controls
-git pull --ff-only
+git fetch origin p2/reader-engine
+git switch --detach 5e826ac49db05ad9cc911f37ece221dc325646c2
 adb devices -l
-bash p2/install-debug.sh --run RUN_ID
+bash p2/install-debug.sh --run 46124278499
 ```
 
 APKを取得済みの場合は、最後の行を `bash p2/install-debug.sh --apk ~/Downloads/reader-debug.apk` に置き換えます。既存のインストールと同じ管理PC・署名鍵で実行します。前回 `P2_SIGNING_DIR` を指定した場合は同じ値を使います。既定の鍵は `~/.local/share/ebook-auto-reader/` にあります。複数台接続時は、環境変数 `ANDROID_SERIAL` でPixel 9を選びます。
@@ -51,19 +50,30 @@ adb shell am start -n io.github.ebookautoreader.debug/io.github.ebookautoreader.
 adb shell am start -n io.github.ebookautoreader.debug/io.github.ebookautoreader.reader.DiagnosticActivity --es test voice
 ```
 
-## 2. 自作ページと実書籍での受入
+## 2. 統合版の優先受入
+
+最初は既定の組版・ページ番号表示ありで実書籍を使い、下記を順番に確認します。異常時はそこで止め、ログと目視結果を残してください。APKの再導入は不要です。
+
+1. **ページ送り往復**：読み上げ停止中に `turn` 診断を実行し、隣接ページへの移動・元ページへの復元を目視。番号違い・入力再送・不明位置への復元がないこと。移動時間を記録。
+2. **耳で聞く**：既定速度で本文を開いて準備を待ち、5〜10ページ連続再生。初回の開始時間、ヘッダー除外、章扉・図版の読み上げ、音切れ、通知操作、停止時の復元を確認。
+3. **目で追う**：設定で選び、新しいセッションを開始。画像を取得後にOCR完了を待たず元ページへ戻ること、音声開始時の表示一致を確認。ページまたぎの文は連結を維持し、文境界で同期する（文字単位の厳密同期は未実装）。
+4. **事前準備の失効**：本文画面に入って準備完了後、手動で別ページに進んで開始。旧ページの音声が出ないこと。準備前・準備済みの開始時間を比較。事前OCRはウィンドウ進入につき1回で、再生前にページ操作はしない。
+5. **キャッシュ**：同一組版・同一表示ページを再読して `ocr cache hit` または事前準備再利用を確認。設定画面の件数・容量・削除を試す。削除は読書終了後に行う。
+6. **速度**：100%、200%、250%を試し、連続再生・保存・復元・音質を確認。高速時の先読み枯渇は別途記録。
+
+## 3. 補足受入：自作ページ・組版・操作中断
 
 1. 上記ADBコマンドで自作ページを起動します。自作ページでは右方向が次ページです。端末画面のページ番号とログの `fixture display` を見比べます。最初の「夜が明けると、川岸の石は朝の光を反射し、水の流れが銀色に見えた。」がページをまたいでつながることを確認します。
 2. `body-bottom` では「空音は実をそっと地面へ戻した。」まで聞こえ、ノンブル27が入らないことを確認します。音声冒頭検証はADBの `test voice` で行います。
 3. DMMで5〜10ページ聴き、飛ばし・重複、ページまたぎ、初回準備後の待ち時間を確認します。画面の **読み上げ中** と **表示** は開始位置からの相対ページ番号です。表示が先行した時点で **一時停止** と **終了** を試し、再生中の文のページか最後に完了した文末のページへ戻ることを確認します。**再開** は中断した文の文頭からです。
 4. 一時停止中に手動でページを変える試験と、文字サイズ・余白を変える試験を行います。古い先読みを読み始めず安全に停止することを確認します。標準条件と文字が小さく余白が異なる条件で、新規に3ページずつ読み直します。
-5. トップ画面で速度と高さを変更し、速度を変更して再開後、再起動後、トップ画面で照合します。速度は0.65〜1.65倍で自動保存します。トップ画面の **設定を保存** は音声の選択と辞書IDに使います。
+5. トップ画面で速度と高さを変更し、速度を変更して再開後、再起動後、トップ画面で照合します。速度は100〜250%（5%刻み）で自動保存します。トップ画面の **設定を保存** は音声の選択と辞書IDに使います。
 
 6. 通知欄・クイック設定を開いたままページ送りが発生しないこと、閉じた後に操作が再開することを確認します。タイルと通知から開始・一時停止・再開・終了をそれぞれ試します。
 7. 読み上げ中と一時停止中に手動でページを変え、画面署名の不一致が検出された後に停止し、未確認位置に復元しないことを確認します。即時検知は保証しません。
 8. 画面ロック、別アプリへの移動、通知を閉じず別アプリへ移動する場合を試し、位置が不確定なら停止することを確認します。通知欄の表示状態を判別できない場合も安全側に停止します。
 
-## 3. 診断ログ
+## 4. 診断ログ
 
 ```bash
 adb logcat -v threadtime -s EbookReader:I
@@ -84,6 +94,11 @@ adb logcat -v threadtime -s EbookReader:I
 | `ocr classification`／`prefetch stopped` | ページ分類と先読み停止理由 |
 | `buffer start`／`buffer wait`／`buffer stop` | 速度反映後の残量、枯渇回数と待ち時間、ページ境界の間隔 |
 | `restore synchronized=` | 読み上げ位置への同期結果 |
+| `prewarm page ready=` / `startup prepared result=` | 事前準備と再利用の成否 |
+| `ocr cache hit` / `ocr cache miss` / `ocr cache store` | OCRキャッシュの成否 |
+| `eye prefetch start` / `eye prefetch restored` | 目で追うモードの先読みと復元 |
+| `image buffer captured` | 保持画像数（上限3） |
+| `page_number navigation` / `page turn result=` | ページ番号認識と遷移判定 |
 
 ログは本文・画像・音声を含みません。音声冒頭の自作WAVは次のコマンドで取得できます。
 
@@ -94,7 +109,7 @@ adb shell -T run-as io.github.ebookautoreader.debug cat cache/diagnostics/sample
 
 P2.2のPixel実測はOCR初期化約7.4秒、ウォーム時の領域検出・文字認識約5.4秒、TTS合成1文約0.1〜0.35秒でした。P2.3ではページ取得・OCR、合成・プレーヤー準備、再生を並行します。初回は最初の音声クリップの準備が整い次第再生します。再生中は20秒分を目標に、最大4ページ先、準備済み音声8件（WAV各4 MiB）まで保持します。読み上げ可能時間よりもページ安定確認とOCRの合計が長い短文ページが続くと、バッファが減ります。
 
-DMMのページ変化の自動判定は画面署名に基づきます。DMMの方向・移動量は実機で目視確認します。位置はセッション内の相対位置です。音声内の文字単位の同期、書籍内の恒久位置、組版変更後の位置復元は今後の対象です。
+DMMのページ変化の自動判定は日本語ML Kitによるページ番号と本文・ヘッダー署名に基づきます。番号が取得できない場合や重複する場合は、中断のない条件で安定した署名差分を用います。番号と署名の矛盾、未知の位置、保護画面では安全停止します。方向・移動量・復元の確度は実機で目視確認します。位置はセッション内の相対位置です。音声内の文字単位の同期、書籍内の恒久位置、組版変更後の位置復元は今後の対象です。
 
 ## Workでの自作OCR測定
 
@@ -123,7 +138,7 @@ adb shell -T run-as io.github.ebookautoreader.debug sh -c \
 
 ### ページ番号 OCR 診断（P2.5A-1）
 
-デバッグ版でアクセシビリティサービスを有効にし、DMMのページ番号が表示された本文を開いて、アイドル中に次を実行する。ページ移動や本文OCR・TTSは行わない。
+デバッグ版でアクセシビリティサービスを有効にし、DMMのページ番号が表示された本文を開いて、アイドル中に次を実行する。診断コマンド自体はページ移動や本文OCR・TTSを行わない。本文画面への進入時の事前準備が別途実行される場合がある。
 
 ```bash
 adb shell am broadcast -a io.github.ebookautoreader.DEBUG_READER \
