@@ -2,6 +2,8 @@
 
 Debug only. Explicit ADB command, authorized DMM visible page and regular screenshot/gesture APIs. Only for lawful personal use where the service permits it; no secure-window bypass, extraction from DRM storage, title/text/image/audio export or permanent product archive. The existing debug cache holds OCR results; the journal stores only numeric page order and exact image/cache hashes. No duplicate text store. Clear OCR cache from settings to remove data and journal. This does not implement reading from an indexed successor yet.
 
+The acquisition entry gate requires the foreground DMM window and no detected reader menu. The optional bookPageView node is diagnostic only (it is a prewarm hint, not a prerequisite). Before any OCR or turn, the normal stable capture and exact expected page-number checks still apply. OS screenshot restrictions remain enforced. Rejection logs distinguish invalid range, wrong owner and open menu.
+
 ## Run
 
 Open the same book at numbered page 1, close all menus. Keep layout, orientation, page direction and theme fixed. Ensure device remains awake and sufficiently powered using normal device settings. Do not interact with the book during acquisition.

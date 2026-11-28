@@ -147,11 +147,21 @@ class ReaderAccessibility : AccessibilityService() {
                     val first = intent.getIntExtra("first", 1)
                     val last = intent.getIntExtra("last", 596)
                     val reset = intent.getBooleanExtra("reset", false)
-                    if (first !in 0..9999 || last !in first..9999 || last - first + 1 > 1000 ||
-                        target.owner != DMM_BOOKS || !hasBookPage(target) || hasReaderMenu(target)) {
-                        ReaderDiagnostics.event("acquire rejected reason=invalid_range_or_not_book_page")
+                    val rejection = when {
+                        first !in 0..9999 || last !in first..9999 || last - first + 1 > 1000 -> "invalid_range"
+                        target.owner != DMM_BOOKS -> "not_dmm_window"
+                        hasReaderMenu(target) -> "page_menu_open"
+                        else -> null
+                    }
+                    if (rejection != null) {
+                        ReaderDiagnostics.event("acquire rejected reason=$rejection")
                         return
                     }
+                    // bookPageView is a warmup hint, not proof that a visible
+                    // numbered reader page is valid. The normal capture path
+                    // confirms stable frames and AcquisitionRun checks the
+                    // expected number before OCR or any forward gesture.
+                    ReaderDiagnostics.event("acquire start first=$first last=$last bookPageNode=${hasBookPage(target)}")
                     acquirePages(target, first, last, reset)
                 }
                 "header" -> diagnoseHeader(target, intent.getStringExtra("expected-title"),
