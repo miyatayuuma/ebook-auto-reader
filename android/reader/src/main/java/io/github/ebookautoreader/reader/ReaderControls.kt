@@ -15,7 +15,7 @@ enum class ControlCommand { PRIMARY, END }
 
 internal fun commandAllowed(mode: String, command: ControlCommand): Boolean = when (command) {
     ControlCommand.PRIMARY -> mode == "IDLE" || mode == "READING" || mode == "PAUSED"
-    ControlCommand.END -> mode == "READING" || mode == "PAUSED" || mode == "PROBE"
+    ControlCommand.END -> mode == "READING" || mode == "PAUSED" || mode == "PROBE" || mode == "BUSY"
 }
 
 internal object ReaderControls {

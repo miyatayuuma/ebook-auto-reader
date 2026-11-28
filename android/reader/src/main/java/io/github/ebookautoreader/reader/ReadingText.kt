@@ -3,7 +3,16 @@ package io.github.ebookautoreader.reader
 data class Position(val page: Int, val line: Int, val offset: Int)
 data class Reading(val start: Int, val end: Int, val kana: String)
 data class LineBounds(val left: Int, val top: Int, val right: Int, val bottom: Int)
-data class SourceLine(val original: String, val ruby: List<Reading> = emptyList(), val bounds: LineBounds? = null)
+enum class LineRole { BODY, HEADING_CANDIDATE, CAPTION, UNKNOWN }
+data class LineLayout(
+    val detectorType: Int, val detection: Float, val certainty: Float,
+    val vertical: Boolean, val estimatedSizePx: Int, val relativeSize: Float?,
+    val role: LineRole,
+)
+data class SourceLine(
+    val original: String, val ruby: List<Reading> = emptyList(),
+    val bounds: LineBounds? = null, val layout: LineLayout? = null,
+)
 data class SourceRange(val page: Int, val line: Int, val start: Int, val end: Int, val bounds: LineBounds? = null)
 data class PageText(val lines: List<SourceLine>, val kind: PageKind)
 enum class PageKind { BODY, HEADING, BLANK, FIGURE }

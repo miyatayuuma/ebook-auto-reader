@@ -28,6 +28,7 @@ internal class PageSignature(private val cells: ByteArray) {
 
     fun compare(other: PageSignature) = difference(other).comparison
     fun matches(other: PageSignature) = compare(other) == PageComparison.SAME
+    fun identical(other: PageSignature) = cells.isNotEmpty() && cells.contentEquals(other.cells)
 }
 
 internal class PageTransition(private val origin: PageSignature) {
@@ -65,6 +66,14 @@ internal class PageTransition(private val origin: PageSignature) {
 internal object PageVisual {
     const val WIDTH = 96
     const val HEIGHT = 160
+
+    fun headerSignature(luma: IntArray): PageSignature {
+        val cells = ByteArray(16 * 6)
+        for (y in 0 until 6) for (x in 0 until 16) {
+            cells[y * 16 + x] = luma[(12 + y) * WIDTH + 2 + x].toByte()
+        }
+        return PageSignature(cells)
+    }
 
     fun signature(luma: IntArray): PageSignature {
         // Exclude narrow side margins and the top/bottom chrome. OCR still receives the full bitmap.

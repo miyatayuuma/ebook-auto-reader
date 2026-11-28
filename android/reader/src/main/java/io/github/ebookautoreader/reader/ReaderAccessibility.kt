@@ -22,13 +22,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
 
@@ -59,7 +57,7 @@ class ReaderAccessibility : AccessibilityService() {
     private var ocrProgress: OcrProgress? = null
     private var synthesis: TtsStage? = null
     private var preparingPlayback = false
-    private var lastScreenshot = 0L
+    private val screenshotGate = ScreenshotGate(clock = SystemClock::elapsedRealtime)
     private var operationId = 0
     private var registered = false
     private var debugRegistered = false
@@ -67,6 +65,20 @@ class ReaderAccessibility : AccessibilityService() {
     private val pageNumberOcr = mutableMapOf<PageNumberModel, PageNumberOcr>()
     private val pageNumberAttempts = mutableMapOf<PageNumberModel, Int>()
     private var commandPending = false
+    private var holdEpoch = 0L
+    private var pageHold = false
+
+    private fun recordHold(blocked: Boolean) {
+        if (blocked && !pageHold) {
+            holdEpoch++
+            ReaderDiagnostics.event("page operations held")
+        } else if (!blocked && pageHold) {
+            ReaderDiagnostics.event("page operations resumed; verification required")
+        }
+        pageHold = blocked
+    }
+    private var restoring = false
+    private var abortRestore = false
 
     private val speechPreferenceChanged = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "rate") {
@@ -179,6 +191,8 @@ class ReaderAccessibility : AccessibilityService() {
     }
 
     private fun refreshWindow(confirmLoss: Boolean = false) {
+        val boundWindow = probeWindow ?: sessionWindow
+        if (boundWindow != null) recordHold(pageOperationsBlocked(boundWindow)) else recordHold(false)
         if (power.isInteractive && !lockScreen.isKeyguardLocked && shadeVisible()) {
             handler.removeCallbacks(confirmWindowLoss)
             targetMissing = false
@@ -204,6 +218,17 @@ class ReaderAccessibility : AccessibilityService() {
     internal fun controlCommand(command: ControlCommand) {
         if (commandPending) return
         if (!commandAllowed(mode.name, command)) return
+        if (mode == Mode.BUSY && command == ControlCommand.END) {
+            abortRestore = true
+            status = "位置復元を中止しています。"
+            render()
+            return
+        }
+        // Stop playback immediately, even when the shade is covering the reader.
+        if (mode == Mode.READING && command == ControlCommand.PRIMARY) { stop(pause = true); return }
+        if ((mode == Mode.READING || mode == Mode.PAUSED || mode == Mode.PROBE) && command == ControlCommand.END) {
+            stop(pause = false); return
+        }
         commandPending = true
         if (shadeVisible()) performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
         scope.launch {
@@ -232,9 +257,25 @@ class ReaderAccessibility : AccessibilityService() {
         }
     }
 
+    private fun pageOperationsBlocked(target: ReaderWindow): Boolean =
+        power.isInteractive && !lockScreen.isKeyguardLocked &&
+            (shadeVisible() || (currentWindow() == target && hasReaderMenu(target)))
+
     private suspend fun awaitReaderWindow(target: ReaderWindow) {
-        while (shadeVisible() && power.isInteractive && !lockScreen.isKeyguardLocked) delay(100)
-        if (currentWindow() != target) throw ReaderFailure("対象のウィンドウが変わりました。", "window_changed")
+        while (true) {
+            if (!power.isInteractive || lockScreen.isKeyguardLocked) {
+                throw ReaderFailure("画面がロックされたため停止しました。", "window_changed")
+            }
+            if (restoring && abortRestore) throw ReaderFailure("位置復元を中止しました。", "restore_cancelled")
+            val blocked = pageOperationsBlocked(target)
+            recordHold(blocked)
+            if (blocked) {
+                delay(100)
+                continue
+            }
+            if (currentWindow() != target) throw ReaderFailure("対象のウィンドウが変わりました。", "window_changed")
+            return
+        }
     }
 
     private fun render() {
@@ -279,7 +320,12 @@ class ReaderAccessibility : AccessibilityService() {
     ): WindowPages = WindowPages(
             this, { currentWindow()?.takeIf { it == target } }, ::awaitReaderWindow,
             { _, send -> awaitReaderWindow(target); send() },
-            { hasReaderMenu(target) }, ::awaitScreenshotSlot, settings,
+            { hasReaderMenu(target) }, screenshotGate, { manager.maximumWindowMetrics.bounds },
+            { pageOperationsBlocked(target) }, { holdEpoch }, settings,
+            { frame, window ->
+                pageNumberOcr.getOrPut(PageNumberModel.JAPANESE) { PageNumberOcr(PageNumberModel.JAPANESE) }
+                    .read(frame.bitmap, window.bounds, manager.maximumWindowMetrics.bounds)
+            },
         ) { frame ->
             requireNotNull(engine).read(frame.bitmap, frame.uniformLight) {
                 ocrProgress = it
@@ -332,12 +378,6 @@ class ReaderAccessibility : AccessibilityService() {
             for (index in 0 until node.childCount) node.getChild(index)?.let(pending::addLast)
         }
         return false
-    }
-
-    private suspend fun awaitScreenshotSlot() {
-        val remaining = 420 - (SystemClock.elapsedRealtime() - lastScreenshot)
-        if (remaining > 0) delay(remaining)
-        lastScreenshot = SystemClock.elapsedRealtime()
     }
 
     private fun probe() {
@@ -461,10 +501,7 @@ class ReaderAccessibility : AccessibilityService() {
     }
 
     private suspend fun finishTestTurn(turn: suspend () -> PageFrame): PageSignature =
-        withContext(NonCancellable) {
-            withTimeoutOrNull(8_000) { turn().use { it.signature } }
-                ?: throw ReaderFailure("移動後の表示を確認できません。", "page_in_transition")
-        }
+        turn().use { it.signature }
 
     private fun turnSettings(target: ReaderWindow) = preferences.turn().let { settings ->
         if (target.owner == DMM_BOOKS) settings else settings.copy(rightward = true)
@@ -501,7 +538,14 @@ class ReaderAccessibility : AccessibilityService() {
 
     private fun createSession(target: ReaderWindow, settings: TurnSettings): ReaderSession {
         val pronunciations = preferences.pronunciations(filesDir)
-        val createdOcr = OnDeviceOcr(filesDir.resolve("ndl")).also { ocr = it }
+        val screen = manager.maximumWindowMetrics.bounds
+        val bodyTopFraction = if (target.owner == DMM_BOOKS)
+            BodyOcrRange.topFraction(screen.top, screen.height(), target.bounds.top, target.bounds.height())
+        else 0.0
+        // Development-only, local reuse. noBackupFilesDir prevents cloud backup.
+        val cache = if (BuildConfig.DEBUG && target.owner == DMM_BOOKS)
+            RecognizedPageCache(noBackupFilesDir.resolve("recognized-pages-v1")) else null
+        val createdOcr = OnDeviceOcr(filesDir.resolve("ndl"), bodyTopFraction, cache).also { ocr = it }
         val createdSpeech = DeviceSpeech(this).also { speech = it }
         val audio = DeviceAudio(this, createdSpeech, preferences, reportSynthesis = {
             synthesis = it
@@ -565,20 +609,27 @@ class ReaderAccessibility : AccessibilityService() {
     private suspend fun restore(): Boolean {
         val current = session ?: return true
         val target = sessionWindow ?: return false
-        if (currentWindow() != target) return false
         change(Mode.BUSY, "読み上げ位置のページに復元中…", expand = true)
+        restoring = true
         return try {
+            if (abortRestore) return false
+            awaitReaderWindow(target)
             ReaderDiagnostics.measure("restore") { current.restore() }.also {
                 val failure = current.restoreFailure
                 ReaderDiagnostics.event("restore synchronized=$it reason=${failure?.reason ?: "none"}")
             }
+        } catch (error: ReaderFailure) {
+            ReaderDiagnostics.event("restore synchronized=false reason=${error.reason}")
+            false
         } finally {
-            // The session retains ownership of its verified position.
+            restoring = false
+            abortRestore = false
         }
     }
 
     private fun stop(pause: Boolean, sync: Boolean = true) {
         if (mode == Mode.IDLE || mode == Mode.BUSY) return
+        abortRestore = false
         val previous = job
         val wasProbe = mode == Mode.PROBE
         val wasTurnTest = testingTurn
@@ -589,7 +640,7 @@ class ReaderAccessibility : AccessibilityService() {
                 change(Mode.BUSY, "OCRなどの処理が終了するのを待っています。", expand = true)
                 previous.join()
             }
-            val synchronized = sync && (wasProbe && session == null || restore())
+            val synchronized = sync && !abortRestore && (wasProbe && session == null || restore())
             if (pause && synchronized && session != null) {
                 change(Mode.PAUSED, "一時停止 · 文頭から再開", expand = true)
             } else {
@@ -610,6 +661,8 @@ class ReaderAccessibility : AccessibilityService() {
     private fun clearSession() {
         session = null
         sessionWindow = null
+        abortRestore = false
+        recordHold(false)
         val closedOcr = ocr
         val closedSpeech = speech
         ocr = null

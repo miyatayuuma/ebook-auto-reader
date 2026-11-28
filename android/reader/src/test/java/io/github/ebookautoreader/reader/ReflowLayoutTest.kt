@@ -98,4 +98,100 @@ class ReflowLayoutTest {
         assertThrows(ReaderFailure::class.java) { ReflowLayout.read(emptyList(), 500, 700, false) }
     }
 
+    @Test
+    fun cropUsesDisplayCoordinatesAndRestoresOriginalLineBounds() {
+        val full = BodyOcrRange.topFraction(0, 2424, 0, 2424)
+        assertEquals(267, BodyOcrRange.topPixels(2424, full))
+        val offset = BodyOcrRange.topFraction(0, 2424, 173, 2251)
+        assertEquals(94, BodyOcrRange.topPixels(2251, offset))
+        assertEquals(0.0, BodyOcrRange.topFraction(0, 2424, 300, 2124), 0.0)
+        val box = BodyOcrRange.toOriginal(Box(100, 0, 140, 500), 267)
+        assertEquals(Box(100, 267, 140, 767), box)
+        val body = Region(box, 1, .95f, "短い本文。")
+        val page = ReflowLayout.read(listOf(body), 1080, 2424, false)
+        assertEquals(listOf("短い本文。"), page.lines.map { it.original })
+        assertEquals(LineBounds(100, 267, 140, 767), page.lines.single().bounds)
+    }
+
+    @Test
+    fun shortTextMisclassifiedAsCaptionCanBeReadWithoutVisual() {
+        val line = Region(Box(240, 200, 270, 340), 2, .9f, "短い本文。")
+        val structure = Region(Box(238, 198, 272, 342), 0, .9f)
+        val page = ReflowLayout.read(listOf(line, structure), 500, 1000, false)
+        assertEquals(PageKind.HEADING, page.kind)
+        assertEquals(listOf("短い本文。"), page.lines.map { it.original })
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(line.copy(complete = false), structure), 500, 1000, false)
+        }
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(line, structure, Region(Box(0, 0, 500, 1000), 3, .9f)), 500, 1000, false)
+        }
+    }
+
+    @Test
+    fun sizeEvidenceDoesNotTurnShortTextIntoHeadingOrChangeSpeech() {
+        val normal = listOf(300, 250, 200).map { x ->
+            Region(Box(x, 100, x + 20, 400), 1, .95f, "通常本文。")
+        }
+        val large = Region(Box(400, 100, 432, 300), 1, .95f, "大きな文字。")
+        val result = ReflowLayout.read(normal + large, 500, 1000, false)
+        assertEquals(PageKind.BODY, result.kind)
+        assertEquals(4, result.lines.size)
+        val evidence = result.lines.single { it.original == large.text }.layout!!
+        assertEquals(32, evidence.estimatedSizePx)
+        assertEquals(1.6f, evidence.relativeSize!!, .001f)
+        assertEquals(LineRole.HEADING_CANDIDATE, evidence.role)
+        val short = ReflowLayout.read(listOf(normal.first()), 500, 1000, false).lines.single()
+        assertEquals(LineRole.BODY, short.layout!!.role)
+        assertNull(short.layout!!.relativeSize)
+    }
+
+    @Test
+    fun separatelyGroupedTwoLineCaptionDoesNotBlockFigure() {
+        // Synthetic geometry representing a figure with an independent,
+        // closely fitting two-line caption block below it.
+        val figure = Region(Box(80, 330, 1000, 1020), 6, .98f)
+        val block = Region(Box(80, 1035, 1000, 1122), 0, .97f)
+        val first = Region(Box(82, 1035, 1000, 1071), 2, .94f, "一行目の説明。")
+        val second = Region(Box(80, 1088, 690, 1123), 2, .94f, "二行目の説明。")
+        val regions = listOf(figure, block, first, second)
+        val events = mutableListOf<String>()
+        val page = ReflowLayout.read(regions, 1080, 2424, false, reportRegion = events::add)
+        assertEquals(PageKind.FIGURE, page.kind)
+        assertEquals(listOf(first.text, second.text), page.lines.map { it.original })
+        assertTrue(events.any { it.contains("type=0") && it.contains("reason=duplicate_structure") })
+        // Missing recognition, unexplained space, or an unrelated structure
+        // must not be silently passed as an illustration.
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(figure, block, first, second.copy(text = "", complete = false)), 1080, 2424, false)
+        }
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(figure, block, first), 1080, 2424, false)
+        }
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(figure, block.copy(box = Box(80, 1035, 1000, 1600)), first, second), 1080, 2424, false)
+        }
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(figure, block.copy(type = 3), first, second), 1080, 2424, false)
+        }
+    }
+
+    @Test
+    fun enclosingIllustrationAndCaptionNeedsTightExplainedBounds() {
+        val image = Region(Box(50, 150, 450, 750), 6, .94f)
+        val caption = Region(Box(100, 760, 400, 790), 2, .9f, "図の説明。")
+        val enclosing = Region(Box(48, 148, 452, 792), 0, .8f)
+        val events = mutableListOf<String>()
+        val page = ReflowLayout.read(listOf(image, caption, enclosing), 500, 1000, false,
+            reportRegion = events::add)
+        assertEquals(PageKind.FIGURE, page.kind)
+        assertEquals(listOf("図の説明。"), page.lines.map { it.original })
+        assertTrue(events.any { it.contains("type=0") && it.contains("reason=duplicate_structure") })
+        val unknown = Region(Box(0, 0, 500, 1000), 3, .9f)
+        assertThrows(ReaderFailure::class.java) { ReflowLayout.read(listOf(image, caption, unknown), 500, 1000, false) }
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(image, caption.copy(text = "", complete = false), enclosing), 500, 1000, false)
+        }
+    }
+
 }

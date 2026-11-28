@@ -288,12 +288,58 @@ class ReaderSessionTest {
         assertEquals(pages.frames, pages.closedFrames)
     }
 
+    @Test
+    fun changedNumberOnSameVisualPagePreventsResume() = runTest {
+        val pages = FakePages(listOf(body("一です。"), body("二です。"))).apply { numbers = listOf(10, 11); verificationDelay = 500 }
+        val session = ReaderSession(pages, FakeAudio(), Pronunciations(), {})
+        val first = async { session.run() }
+        advanceTimeBy(300)
+        first.cancelAndJoin()
+        assertTrue(session.restore())
+        val turns = pages.turns.size
+        pages.numbers = listOf(99, 11)
+        assertTrue(runCatching { session.run() }.isFailure)
+        assertEquals(turns, pages.turns.size)
+        assertFalse(session.restore())
+    }
+
+    @Test
+    fun cancellingDispatchedTurnCanConfirmUnchangedOriginWithoutRepeatingInput() = runTest {
+        val pages = FakePages(listOf(body("一です。"), body("二です。"))).apply { turnDelay = 5_000 }
+        val session = ReaderSession(pages, FakeAudio(), Pronunciations(), {})
+        val first = async { session.run() }
+        advanceTimeBy(500)
+        assertEquals(listOf(true), pages.turns)
+        first.cancelAndJoin()
+        assertTrue(session.restore())
+        assertEquals(listOf(true), pages.turns)
+    }
+
+    @Test
+    fun cancelledTurnToUnknownPageCannotGuessOrRestore() = runTest {
+        val pages = FakePages(listOf(body("一です。"), body("二です。"))).apply {
+            turnDelay = 5_000
+            numbers = listOf(10, 11)
+        }
+        val session = ReaderSession(pages, FakeAudio(), Pronunciations(), {})
+        val first = async { session.run() }
+        advanceTimeBy(500)
+        first.cancelAndJoin()
+        // Android may already have delivered a cancelled coroutine's gesture.
+        pages.display = 1
+        assertFalse(session.restore())
+        assertEquals(listOf(true), pages.turns)
+        assertEquals(pages.frames, pages.closedFrames)
+    }
+
     private fun body(vararg lines: String) = PageText(lines.map { SourceLine(it) }, PageKind.BODY)
 
     private class FakePages(private val pages: List<PageText>,
                             private val signatures: List<String> = pages.indices.map(Int::toString)) : ReaderPages {
         var display = 0
         var verificationDelay = 0L
+        var turnDelay = 55L
+        var numbers: List<Int?> = pages.indices.map { null }
         var readDelay = 50L
         var turnFailure: ReaderFailure? = null
         private fun signature(page: Int): PageSignature {
@@ -307,6 +353,7 @@ class ReaderSessionTest {
 
         private inner class Frame(val page: Int) : PageFrame {
             override val signature = signature(page)
+            override val pageNumber = numbers[page]
             override fun close() { closedFrames++ }
         }
 
@@ -321,7 +368,7 @@ class ReaderSessionTest {
             if (!previous.matches(signature(display))) throw ReaderFailure("manual movement")
             return {
                 turns += forward
-                delay(55)
+                delay(turnDelay)
                 turnFailure?.let { throw it }
                 display = (display + if (forward) 1 else -1).coerceIn(pages.indices)
                 capture()

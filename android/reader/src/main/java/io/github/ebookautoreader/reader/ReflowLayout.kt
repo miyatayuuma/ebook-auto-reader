@@ -45,12 +45,15 @@ internal object ReflowLayout {
             text.length in 1..5 && text.all { it.isDigit() }
     }
 
+    private fun headerReason(region: Region, ignored: List<Region>): String? =
+        if (coveredByHeaderOrFooter(region, ignored)) "detected_header_or_footer" else null
+
     fun recognitionCandidates(regions: List<Region>): Set<Region> {
         val ignored = ignored(regions)
         return regions.filterTo(HashSet()) {
             when (it.type) {
-                10 -> it.detection >= 0.35f
-                in textTypes -> !coveredByHeaderOrFooter(it, ignored)
+                10 -> it.detection >= 0.35f && headerReason(it, ignored) == null
+                in textTypes -> headerReason(it, ignored) == null
                 else -> false
             }
         }
@@ -59,19 +62,19 @@ internal object ReflowLayout {
     fun read(
         regions: List<Region>, width: Int, height: Int, uniformLight: Boolean,
         reportClassification: (String) -> Unit = {},
+        reportRegion: (String) -> Unit = {},
         reportBottomLines: (Int) -> Unit = {},
     ): PageText {
-        val rubyCandidates = regions.filter { it.type == 10 && it.detection >= 0.35f &&
-            it.certainty >= 0.65f && it.complete && it.text.isReading() }
         val ignored = ignored(regions)
-
+        val rubyCandidates = regions.filter { headerReason(it, ignored) == null && it.type == 10 && it.detection >= 0.35f &&
+            it.certainty >= 0.65f && it.complete && it.text.isReading() }
         val lines = mutableListOf<Region>()
         val candidates = regions.filter { it.type in setOf(1, 2, 4, 5, 16) }
             .sortedWith(compareByDescending<Region> { it.complete && it.text.isNotBlank() }
                 .thenByDescending { it.detection })
         for (candidate in candidates) {
             val box = candidate.box
-            if (coveredByHeaderOrFooter(candidate, ignored) || isFolio(candidate, width, height)) continue
+            if (headerReason(candidate, ignored) != null || isFolio(candidate, width, height)) continue
             if (rubyCandidates.any {
                     maxOf(box.area, it.box.area) * 0.85 <= box.intersection(it.box)
                 }) continue
@@ -79,26 +82,65 @@ internal object ReflowLayout {
             lines += candidate
         }
         val substantive = lines.filter { it.type == 1 || it.type == 16 }
+        val captions = lines.filter { it.type in setOf(2, 4, 5) && it.complete && hasJapanese(it.text) }
+        val visuals = regions.filter { it.type in visualTypes && it.detection >= 0.68f &&
+            it.box.area.toLong() >= width.toLong() * height * 0.04 }
+        // Only dismiss an enclosing structure when its bounds closely match a
+        // confirmed visual together with successfully recognized captions.
+        val ambiguous = regions.filter { it.type in setOf(0, 3, 7, 12, 13, 14) }
+            .filter { region ->
+                val header = headerReason(region, ignored) != null
+                val duplicate = region.box.area > 0 && visuals.any { visual ->
+                    val insideVisual = region.box.intersection(visual.box).toLong() >= region.box.area.toLong() * .85
+                    val overlapsCaptions = captions.filter { region.box.intersection(it.box) > 0 }
+                    val components = listOf(visual) + overlapsCaptions
+                    val envelope = Box(components.minOf { it.box.left }, components.minOf { it.box.top },
+                        components.maxOf { it.box.right }, components.maxOf { it.box.bottom })
+                    val encloses = components.all { it.box.area > 0 &&
+                        region.box.intersection(it.box).toLong() >= it.box.area.toLong() * .85 } &&
+                        region.box.area.toLong() <= envelope.area.toLong() * 1.25
+                    insideVisual || encloses
+                }
+                // A short text-only page may be labeled as a caption by the detector.
+                // Discard an enclosing structure only if a recognized line explains it.
+                val textDuplicate = visuals.isEmpty() && region.box.area > 0 && captions.any { line ->
+                    line.box.area > 0 &&
+                        region.box.intersection(line.box).toLong() >= line.box.area.toLong() * .85 &&
+                        region.box.area.toLong() <= line.box.area.toLong() * 1.25
+                }
+                // NDLOCR may emit a text-block structure (type 0) around multiple
+                // caption lines separately from the illustration. It is not an
+                // unknown structure if the recognized lines explain its bounds.
+                val captionBlock = region.type == 0 && explainedCaptionBlock(region.box, captions)
+                !header && !duplicate && !textDuplicate && !captionBlock
+            }
+        for (region in regions) {
+            val reason = headerReason(region, ignored) ?: when {
+                region in ambiguous -> "blocking_structure"
+                region in substantive -> "body_or_heading"
+                region in captions -> "recognized_caption"
+                region in rubyCandidates -> "ruby_candidate"
+                isFolio(region, width, height) -> "numeric_folio"
+                region.type in setOf(0, 3, 7, 12, 13, 14) -> "duplicate_structure"
+                region in visuals -> "confirmed_visual"
+                else -> "other"
+            }
+            val b = region.box
+            reportRegion("type=${region.type} box=${b.left.toDouble()/width},${b.top.toDouble()/height}," +
+                "${b.right.toDouble()/width},${b.bottom.toDouble()/height} confidence=${region.detection} reason=$reason")
+        }
         if (substantive.any { !it.complete || it.text.isBlank() } ||
             substantive.isNotEmpty() && substantive.none { hasJapanese(it.text) }) {
             reportClassification("kind=undetermined reason=incomplete_body")
             throw ReaderFailure("本文候補の一部を認識できません。表示と文字サイズを確認してください。", "ocr_incomplete_body")
         }
-        val captions = lines.filter { it.type in setOf(2, 4, 5) && it.complete && hasJapanese(it.text) }
-        val visuals = regions.filter { it.type in visualTypes && it.detection >= 0.68f &&
-            it.box.area.toLong() >= width.toLong() * height * 0.04 }
-        // Structure detections fully inside a confirmed visual can describe the same illustration.
-        // Anything outside it remains ambiguous and must not be silently skipped.
-        val ambiguous = regions.filter { it.type in setOf(0, 3, 7, 12, 13, 14) }
-            .filter { region -> region.box.area <= 0 || visuals.none {
-                region.box.intersection(it.box).toLong() >= region.box.area.toLong() * 0.85
-            } }
         val failedCaptions = lines.count { it.type in setOf(2, 4, 5) &&
             (!it.complete || it.text.isBlank() || !hasJapanese(it.text)) }
         val kind = when {
             substantive.any { it.type == 1 } -> PageKind.BODY
             substantive.isNotEmpty() -> PageKind.HEADING
             visuals.isNotEmpty() && ambiguous.isEmpty() && failedCaptions == 0 -> PageKind.FIGURE
+            visuals.isEmpty() && captions.isNotEmpty() && ambiguous.isEmpty() && failedCaptions == 0 -> PageKind.HEADING
             uniformLight && regions.isEmpty() -> PageKind.BLANK
             else -> {
                 val reason = when {
@@ -119,9 +161,42 @@ internal object ReflowLayout {
         }
         val ordered = order(substantive) + order(captions)
         reportBottomLines(ordered.count { it.box.bottom >= height * 0.87 })
-        return PageText(ordered.map { SourceLine(it.text, ruby[it].orEmpty(), it.box.let { box ->
-            LineBounds(box.left, box.top, box.right, box.bottom)
-        }) }, kind)
+        return PageText(ordered.map { line ->
+            val box = line.box
+            SourceLine(line.text, ruby[line].orEmpty(), LineBounds(box.left, box.top, box.right, box.bottom),
+                describeLine(line, substantive, visuals.isNotEmpty()))
+        }, kind)
+    }
+
+    // Descriptive evidence only: never discard or reorder a line using this estimate.
+    private fun describeLine(line: Region, body: List<Region>, hasVisual: Boolean): LineLayout {
+        fun size(region: Region) = if (region.vertical) region.box.width else region.box.height
+        val size = size(line).coerceAtLeast(0)
+        val references = body.filter { it.type == 1 && it.vertical == line.vertical &&
+            it.detection >= .68f && size(it) > 0 }.map(::size).sorted()
+        val ratio = if (references.size >= 3 && size > 0) size.toFloat() / references[references.size / 2] else null
+        val role = when {
+            line.type in setOf(2, 4, 5) -> if (hasVisual) LineRole.CAPTION else LineRole.UNKNOWN
+            line.type == 16 || (line.type == 1 && ratio != null && ratio >= 1.3f) -> LineRole.HEADING_CANDIDATE
+            line.type == 1 -> LineRole.BODY
+            else -> LineRole.UNKNOWN
+        }
+        return LineLayout(line.type, line.detection, line.certainty, line.vertical, size, ratio, role)
+    }
+
+    private fun explainedCaptionBlock(block: Box, captions: List<Region>): Boolean {
+        if (block.area <= 0) return false
+        val inside = captions.map { it.box }.filter { it.area > 0 &&
+            block.intersection(it).toLong() >= it.area.toLong() * .85 }
+        if (inside.isEmpty()) return false
+        val envelope = Box(inside.minOf { it.left }, inside.minOf { it.top },
+            inside.maxOf { it.right }, inside.maxOf { it.bottom })
+        val overlap = block.intersection(envelope).toLong()
+        // Require mutual coverage, not just that the block contains some text.
+        // The 50% line-area floor rejects a large unexplained gap between lines.
+        return overlap >= block.area.toLong() * .85 &&
+            overlap >= envelope.area.toLong() * .85 &&
+            inside.sumOf { block.intersection(it).toLong() } >= block.area.toLong() * .5
     }
 
     private fun hasJapanese(text: String) = text.any { it in 'ぁ'..'ヿ' || it in '㐀'..'鿿' }
