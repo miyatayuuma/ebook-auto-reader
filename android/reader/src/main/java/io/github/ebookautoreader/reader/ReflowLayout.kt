@@ -85,6 +85,9 @@ internal object ReflowLayout {
         val captions = lines.filter { it.type in setOf(2, 4, 5) && it.complete && hasJapanese(it.text) }
         val visuals = regions.filter { it.type in visualTypes && it.detection >= 0.68f &&
             it.box.area.toLong() >= width.toLong() * height * 0.04 }
+        val figureText = lines.filter { line -> line.box.area > 0 && visuals.any { visual ->
+            line.box.intersection(visual.box).toLong() >= line.box.area.toLong() * .85
+        } }
         // Only dismiss an enclosing structure when its bounds closely match a
         // confirmed visual together with successfully recognized captions.
         val ambiguous = regions.filter { it.type in setOf(0, 3, 7, 12, 13, 14) }
@@ -111,12 +114,14 @@ internal object ReflowLayout {
                 // NDLOCR may emit a text-block structure (type 0) around multiple
                 // caption lines separately from the illustration. It is not an
                 // unknown structure if the recognized lines explain its bounds.
-                val captionBlock = region.type == 0 && explainedCaptionBlock(region.box, captions)
+                val captionBlock = region.type == 0 && (explainedCaptionBlock(region.box, captions) ||
+                    (visuals.isNotEmpty() && explainedRaggedCaptionBlock(region.box, captions)))
                 !header && !duplicate && !textDuplicate && !captionBlock
             }
         for (region in regions) {
             val reason = headerReason(region, ignored) ?: when {
                 region in ambiguous -> "blocking_structure"
+                region in figureText -> if (region.complete && region.text.isNotBlank()) "figure_text_candidate" else "figure_text_unreadable"
                 region in substantive -> "body_or_heading"
                 region in captions -> "recognized_caption"
                 region in rubyCandidates -> "ruby_candidate"
@@ -164,7 +169,10 @@ internal object ReflowLayout {
         return PageText(ordered.map { line ->
             val box = line.box
             SourceLine(line.text, ruby[line].orEmpty(), LineBounds(box.left, box.top, box.right, box.bottom),
-                describeLine(line, substantive, visuals.isNotEmpty()))
+                describeLine(line, substantive, visuals.isNotEmpty()).let {
+                    // Location evidence only; retain text and existing speech order.
+                    if (line in figureText) it.copy(role = LineRole.FIGURE_TEXT) else it
+                })
         }, kind)
     }
 
@@ -197,6 +205,33 @@ internal object ReflowLayout {
         return overlap >= block.area.toLong() * .85 &&
             overlap >= envelope.area.toLong() * .85 &&
             inside.sumOf { block.intersection(it).toLong() } >= block.area.toLong() * .5
+    }
+
+    // A short last line of a horizontal photo caption leaves legitimate
+    // whitespace on the right. Area coverage alone rejects that layout.
+    // Require a tight envelope, aligned line starts, a full-width line and
+    // dense vertical coverage; do not relax unrelated structures or failed text.
+    private fun explainedRaggedCaptionBlock(block: Box, captions: List<Region>): Boolean {
+        if (block.area <= 0) return false
+        val inside = captions.filter { !it.vertical && it.box.area > 0 &&
+            block.intersection(it.box).toLong() >= it.box.area.toLong() * .85 }
+            .map { it.box }.sortedBy { it.top }
+        if (inside.size < 2) return false
+        val envelope = Box(inside.minOf { it.left }, inside.first().top,
+            inside.maxOf { it.right }, inside.maxOf { it.bottom })
+        val overlap = block.intersection(envelope).toLong()
+        if (overlap < block.area.toLong() * .85 || overlap < envelope.area.toLong() * .85) return false
+        val pitch = inside.map { it.height }.sorted()[inside.size / 2].coerceAtLeast(1)
+        if (inside.any { abs(it.left - envelope.left) > pitch * .5 ||
+            it.height < pitch * .6 || it.height > pitch * 1.5 }) return false
+        if (inside.dropLast(1).any { it.width < block.width * .85 }) return false
+        if (inside.zipWithNext().any { (a, b) ->
+                b.top < a.bottom || b.top - a.bottom > pitch * .75
+            }) return false
+        val coveredHeight = inside.sumOf {
+            (minOf(block.bottom, it.bottom) - maxOf(block.top, it.top)).coerceAtLeast(0)
+        }
+        return coveredHeight >= block.height * .75
     }
 
     private fun hasJapanese(text: String) = text.any { it in 'ぁ'..'ヿ' || it in '㐀'..'鿿' }

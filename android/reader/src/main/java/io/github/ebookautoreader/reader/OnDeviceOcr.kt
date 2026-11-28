@@ -86,6 +86,13 @@ internal class OnDeviceOcr(
         return PageCacheKey.hex(digest.digest())
     }
 
+    // Acquisition counts a page only after the existing exact-model/crop cache
+    // contains a valid persisted payload. No new copy of the text is created.
+    suspend fun persistedKey(image: Bitmap): String? = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        val key = cacheKey(image, BodyOcrRange.topPixels(image.height, bodyTopFraction))
+        key?.takeIf { pageCache?.get(it) != null }
+    }
+
     suspend fun prewarm() {
         ReaderDiagnostics.measure("prewarm ocr") {
             runOcrWork(Dispatchers.Default, deadlineMs = 90_000,

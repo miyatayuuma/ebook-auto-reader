@@ -3,7 +3,7 @@ package io.github.ebookautoreader.reader
 data class Position(val page: Int, val line: Int, val offset: Int)
 data class Reading(val start: Int, val end: Int, val kana: String)
 data class LineBounds(val left: Int, val top: Int, val right: Int, val bottom: Int)
-enum class LineRole { BODY, HEADING_CANDIDATE, CAPTION, UNKNOWN }
+enum class LineRole { BODY, HEADING_CANDIDATE, CAPTION, UNKNOWN, FIGURE_TEXT }
 data class LineLayout(
     val detectorType: Int, val detection: Float, val certainty: Float,
     val vertical: Boolean, val estimatedSizePx: Int, val relativeSize: Float?,
