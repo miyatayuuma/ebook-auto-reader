@@ -28,8 +28,7 @@ class TurnService : AccessibilityService() {
     private var target:Target?=null
     private var readerId:Int?=null
     private var blocked=false
-    private var tb=false
-    private var playing=false
+        private var playing=false
     private var registered=false
     private var generation=0
     private var captureAt=0L
@@ -43,6 +42,13 @@ class TurnService : AccessibilityService() {
     private var lastVerify:PageFeatures?=null
     private var shadeHold=false
     private var waitExtra=false
+    private var earliestTurn=0L
+    private val renewWake=object:Runnable { override fun run(){
+        val lock=wake?:return
+        if(phase==Phase.IDLE)return
+        if(runCatching{ lock.acquire(2*60*60*1000L) }.isFailure){halt("wake_renew_failed",true);return}
+        h.postDelayed(this,30*60*1000L)
+    }}
     private val evaluation=Runnable { evaluate() }
     private val refresh=Runnable { reconcile() }
     private fun now()=SystemClock.elapsedRealtime()
@@ -126,8 +132,7 @@ class TurnService : AccessibilityService() {
     }
     private fun reconcile(){
         val on=talkbackOn()
-        if(!on){ if(phase!=Phase.IDLE)halt("talkback_off",false); blocked=false; tb=false; return }
-        tb=true
+        if(!on){ if(phase!=Phase.IDLE)halt("talkback_off",false); blocked=false; return }
         if(!registered||blocked)return
         if(phase!=Phase.IDLE && shade()){
             if(!shadeHold){shadeHold=true;h.removeCallbacks(evaluation);log("notification_hold")}
@@ -147,11 +152,11 @@ class TurnService : AccessibilityService() {
         val state=syncAudio()?:return halt("audio_unavailable",true)
         prefs=p; target=t; generation++; phase=Phase.BASELINE; playing=state
         timing=Timing(p.gap,p.noSpeech); timing.reset(now(),state)
-        consecutiveImages=0; turns=0; waitExtra=false
+        consecutiveImages=0; turns=0; waitExtra=false; earliestTurn=now()+1500
         if(p.awake){
             val lock=power.newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK,"EbookAutoTurn:reading").apply { setReferenceCounted(false) }
             if(runCatching { lock.acquire(2*60*60*1000L) }.isFailure){halt("wake_failed",true);return}
-            wake=lock
+            wake=lock; h.postDelayed(renewWake,30*60*1000L)
         }
         showNotification("自動ページ送り動作中")
         log("start gap=${p.gap} imageWait=${p.noSpeech} audio=$state")
@@ -171,7 +176,7 @@ class TurnService : AccessibilityService() {
     internal fun emergencyStop(){ halt("emergency_stop",true) }
     private fun halt(reason:String,latch:Boolean){
         if(latch)blocked=true
-        generation++; h.removeCallbacks(evaluation); phase=Phase.IDLE
+        generation++; h.removeCallbacks(evaluation); h.removeCallbacks(renewWake); phase=Phase.IDLE
         target=null; baseline=null; lastVerify=null; shadeHold=false
         wake?.let { if(it.isHeld)runCatching{it.release()} }; wake=null
         notifications.cancel(1); log("stop reason=$reason turns=$turns blocked=$blocked")
@@ -179,7 +184,7 @@ class TurnService : AccessibilityService() {
     private fun schedule(){
         h.removeCallbacks(evaluation)
         if(phase!=Phase.READING||shadeHold)return
-        timing.next(now())?.let { h.postDelayed(evaluation,it.coerceAtLeast(20)) }
+        timing.next(now())?.let { h.postDelayed(evaluation,maxOf(it,earliestTurn-now(),20L)) }
     }
     private fun valid():Boolean {
         if(!talkbackOn()){halt("talkback_off",false);return false}
@@ -191,6 +196,7 @@ class TurnService : AccessibilityService() {
         if(phase!=Phase.READING||!valid())return
         val state=syncAudio()?:return halt("audio_unavailable",true)
         if(state!=playing){playing=state;timing.audio(now(),state)}
+        if(now()<earliestTurn){schedule();return}
         val due=timing.due(now())
         if(due==Due.NONE){schedule();return}
         phase=Phase.CHECK
@@ -199,7 +205,7 @@ class TurnService : AccessibilityService() {
             if(!old.same(frame))return@capture halt("external_page_change",true)
             val fresh=syncAudio()?:return@capture halt("audio_unavailable",true)
             if(fresh!=playing){playing=fresh;timing.audio(now(),fresh)}
-            if(playing||timing.due(now())==Due.NONE){phase=Phase.READING;schedule();return@capture}
+            if(playing||timing.due(now())!=due){phase=Phase.READING;schedule();return@capture}
             if(due==Due.NO_SPEECH){
                 log("image_check positive=${frame.image} large=${frame.largeInk} glyph=${frame.smallInk}")
                 if(!frame.image||prefs?.skip!=true){
@@ -216,7 +222,7 @@ class TurnService : AccessibilityService() {
         if(!valid())return
         val state=syncAudio()?:return halt("audio_unavailable",true)
         if(state){playing=true;timing.audio(now(),true);phase=Phase.READING;schedule();return}
-        phase=Phase.TURN;timing.reset(now(),false);playing=false;waitExtra=false
+        phase=Phase.TURN;timing.reset(now(),false);playing=false;waitExtra=false;earliestTurn=0
         val p=prefs?:return halt("no_prefs",true)
         val b=t.bounds
         fun x(f:Float)=b.left+b.width()*f
@@ -256,6 +262,7 @@ class TurnService : AccessibilityService() {
                 // Keep any speech onset/stop that occurred during transition.
                 // If none started, start the 1.5s wait from verified stable page.
                 if(!timing.seen)timing.reset(now(),playing)
+                earliestTurn=now()+100
                 log("page_verified count=$turns audio=$playing"); schedule()
             }else{lastVerify=frame;h.postDelayed({verify(g)},450)}
         }
