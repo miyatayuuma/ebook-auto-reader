@@ -53,7 +53,6 @@ internal class ReaderSession(
     private val audio: ReaderAudio,
     pronunciations: Pronunciations,
     private val report: (ReaderState) -> Unit,
-    private val startupBufferMs: Long = 0,
     private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
     private val log: (String) -> Unit = {},
 ) {
@@ -85,6 +84,12 @@ internal class ReaderSession(
     var restoreFailure: ReaderFailure? = null
         private set
     private var state = ReaderState()
+    private var runStarted = 0L
+    private val milestones = mutableSetOf<String>()
+
+    private fun milestone(name: String) {
+        if (milestones.add(name)) log("startup $name elapsedMs=${clock() - runStarted}")
+    }
 
     private fun update(value: ReaderState) {
         val elapsed = if (value.playing != null) value.milliseconds else 0
@@ -100,15 +105,16 @@ internal class ReaderSession(
 
     private fun clipCount() = pending.count { it.clip != null }
 
-    suspend fun run() {
+    suspend fun run(startedAt: Long = clock()) {
+        runStarted = startedAt
+        milestones.clear()
         try {
             coroutineScope {
-                val resuming = cursor != null
                 verifyOrStart()
                 launch { producePages() }
                 launch { produceText() }
                 launch { produceAudio() }
-                consume(initialBuffer = !resuming && startupBufferMs > 0)
+                consume()
             }
         } finally {
             // Structured cancellation has joined both workers, including any dispatched turn.
@@ -125,8 +131,7 @@ internal class ReaderSession(
         }
     }
 
-    private suspend fun consume(initialBuffer: Boolean) {
-        var fillAtStart = initialBuffer
+    private suspend fun consume() {
         var lastEnd: Long? = null
         var lastStartPage: Int? = null
         var starvations = 0
@@ -155,20 +160,11 @@ internal class ReaderSession(
                     continue
                 }
 
-                if (fillAtStart) {
-                    fillAtStart = false
-                    val start = clock()
-                    withTimeoutOrNull(9_000) {
-                        changes.first {
-                            availableMs() >= startupBufferMs || reachedFailure != null || clipCount() >= MAX_CLIPS
-                        }
-                    }
-                    log("buffer startup fillMs=${clock() - start} remainingMs=${availableMs()}")
-                }
                 val unit = requireNotNull(current).unit
                 var startedAt: Long? = null
                 audio.play(clip, started = {
                     val now = clock()
+                    milestone("playback")
                     val gap = lastEnd?.let { now - it }
                     startedAt = now
                     update(state.copy(playing = unit.start, confirmed = unit.start,
@@ -253,6 +249,7 @@ internal class ReaderSession(
                 item.frame.use { decode(it, item.index) }
             } catch (failure: ReaderFailure) {
                 reachedFailure = failure
+                log("prefetch stopped stage=ocr reason=${failure.reason} page=${item.index}")
                 frames.forEach { it.frame.close() }
                 frames.clear()
                 update(state)
@@ -284,6 +281,7 @@ internal class ReaderSession(
                 throw ReaderFailure("合成音声の容量または長さが不正です。", "audio_clip_limit")
             }
             entry.clip = clip
+            milestone("synthesis")
             update(state.copy(synthesized = entry.unit.end))
             log("buffer prepared page=${entry.unit.end.page} clips=${clipCount()} remainingMs=${state.bufferMs}")
         }
@@ -296,6 +294,7 @@ internal class ReaderSession(
         if (cursor == null) {
             update(state.copy(stage = ReaderStage.CAPTURE))
             val frame = pages.capture()
+            milestone("capture")
             register(KnownPage(0, frame.signature))
             frames.addLast(CapturedPage(0, frame))
             captured = 0
@@ -303,6 +302,7 @@ internal class ReaderSession(
         } else {
             update(state.copy(stage = ReaderStage.CAPTURE))
             checkedCapture(requireNotNull(cursor)).close()
+            milestone("capture")
         }
     }
 
@@ -326,6 +326,7 @@ internal class ReaderSession(
     private suspend fun decode(frame: PageFrame, index: Int) {
         if (state.playing == null) update(state.copy(stage = ReaderStage.OCR))
         val page = pages.read(frame)
+        milestone("ocr")
         if (page.kind in listOf(PageKind.BODY, PageKind.HEADING) && page.lines.none { it.original.isNotBlank() }) {
             throw ReaderFailure("本文を確認できません。")
         }

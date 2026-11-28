@@ -80,7 +80,9 @@ adb logcat -v threadtime -s EbookReader:I
 | `fixture touch` | 自作画面のMotionEvent、座標、指の数、押下時間 |
 | `ocr stage=MODEL/DETECT/RECOGNIZE/LAYOUT` | 初期化、領域検出、文字認識、組版解析 |
 | `tts synthesize`／`audio prepare`／`audio completed` | 合成、事前の再生準備、再生ヘッド確認から完了まで |
-| `buffer startup`／`buffer start`／`buffer wait`／`buffer stop` | 初回の蓄積、速度反映後の残量、枯渇回数と待ち時間、ページ境界の間隔 |
+| `startup capture/ocr/synthesis/playback` | 開始命令から各段階までの累積時間（ms） |
+| `ocr classification`／`prefetch stopped` | ページ分類と先読み停止理由 |
+| `buffer start`／`buffer wait`／`buffer stop` | 速度反映後の残量、枯渇回数と待ち時間、ページ境界の間隔 |
 | `restore synchronized=` | 読み上げ位置への同期結果 |
 
 ログは本文・画像・音声を含みません。音声冒頭の自作WAVは次のコマンドで取得できます。
@@ -90,7 +92,7 @@ adb shell -T run-as io.github.ebookautoreader.debug cat cache/diagnostics/sample
 adb shell -T run-as io.github.ebookautoreader.debug cat cache/diagnostics/sample-played.wav > sample-played.wav
 ```
 
-P2.2のPixel実測はOCR初期化約7.4秒、ウォーム時の領域検出・文字認識約5.4秒、TTS合成1文約0.1〜0.35秒でした。P2.3ではページ取得・OCR、合成・プレーヤー準備、再生を並行します。初回の目標は8秒分、最初の音声準備後の追加待機は最大9秒です。再生中は20秒分を目標に、最大4ページ先、準備済み音声8件（WAV各4 MiB）まで保持します。読み上げ可能時間よりもページ安定確認とOCRの合計が長い短文ページが続くと、バッファが減ります。
+P2.2のPixel実測はOCR初期化約7.4秒、ウォーム時の領域検出・文字認識約5.4秒、TTS合成1文約0.1〜0.35秒でした。P2.3ではページ取得・OCR、合成・プレーヤー準備、再生を並行します。初回は最初の音声クリップの準備が整い次第再生します。再生中は20秒分を目標に、最大4ページ先、準備済み音声8件（WAV各4 MiB）まで保持します。読み上げ可能時間よりもページ安定確認とOCRの合計が長い短文ページが続くと、バッファが減ります。
 
 DMMのページ変化の自動判定は画面署名に基づきます。DMMの方向・移動量は実機で目視確認します。位置はセッション内の相対位置です。音声内の文字単位の同期、書籍内の恒久位置、組版変更後の位置復元は今後の対象です。
 

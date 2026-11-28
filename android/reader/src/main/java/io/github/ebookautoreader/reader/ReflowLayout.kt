@@ -58,6 +58,7 @@ internal object ReflowLayout {
 
     fun read(
         regions: List<Region>, width: Int, height: Int, uniformLight: Boolean,
+        reportClassification: (String) -> Unit = {},
         reportBottomLines: (Int) -> Unit = {},
     ): PageText {
         val rubyCandidates = regions.filter { it.type == 10 && it.detection >= 0.35f &&
@@ -80,18 +81,36 @@ internal object ReflowLayout {
         val substantive = lines.filter { it.type == 1 || it.type == 16 }
         if (substantive.any { !it.complete || it.text.isBlank() } ||
             substantive.isNotEmpty() && substantive.none { hasJapanese(it.text) }) {
+            reportClassification("kind=undetermined reason=incomplete_body")
             throw ReaderFailure("本文候補の一部を認識できません。表示と文字サイズを確認してください。", "ocr_incomplete_body")
         }
         val captions = lines.filter { it.type in setOf(2, 4, 5) && it.complete && hasJapanese(it.text) }
-        val figure = regions.any { it.type in visualTypes && it.detection >= 0.68f &&
-            it.box.area >= width.toLong() * height * 0.04 }
+        val visuals = regions.filter { it.type in visualTypes && it.detection >= 0.68f &&
+            it.box.area.toLong() >= width.toLong() * height * 0.04 }
+        // Structure detections fully inside a confirmed visual can describe the same illustration.
+        // Anything outside it remains ambiguous and must not be silently skipped.
+        val ambiguous = regions.filter { it.type in setOf(0, 3, 7, 12, 13, 14) }
+            .filter { region -> region.box.area <= 0 || visuals.none {
+                region.box.intersection(it.box).toLong() >= region.box.area.toLong() * 0.85
+            } }
+        val failedCaptions = lines.count { it.type in setOf(2, 4, 5) &&
+            (!it.complete || it.text.isBlank() || !hasJapanese(it.text)) }
         val kind = when {
             substantive.any { it.type == 1 } -> PageKind.BODY
             substantive.isNotEmpty() -> PageKind.HEADING
-            figure && regions.none { it.type in setOf(0, 3, 7, 12, 13, 14) } -> PageKind.FIGURE
+            visuals.isNotEmpty() && ambiguous.isEmpty() && failedCaptions == 0 -> PageKind.FIGURE
             uniformLight && regions.isEmpty() -> PageKind.BLANK
-            else -> throw ReaderFailure("本文・図表・白紙を確定できません。表示ページを確認してください。")
+            else -> {
+                val reason = when {
+                    visuals.isEmpty() -> "no_confirmed_visual"
+                    ambiguous.isNotEmpty() -> "ambiguous_structure"
+                    else -> "unreadable_caption"
+                }
+                reportClassification("kind=undetermined reason=$reason visuals=${visuals.size} ambiguous=${ambiguous.size} failedCaptions=$failedCaptions")
+                throw ReaderFailure("本文・図表・白紙を確定できません。表示ページを確認してください。", "ocr_unclassified_page")
+            }
         }
+        reportClassification("kind=$kind reason=classified visuals=${visuals.size} ambiguous=${ambiguous.size} failedCaptions=$failedCaptions")
         val ruby = mutableMapOf<Region, MutableList<Reading>>()
         for (small in rubyCandidates) {
             val parent = substantive.filter { canParent(it, small) }.singleOrNull() ?: continue

@@ -508,13 +508,14 @@ class ReaderAccessibility : AccessibilityService() {
         }
         val settings = turnSettings(target)
         if (session == null) digitTemplates.reset("new_session")
+        val startedAt = SystemClock.elapsedRealtime()
         sessionWindow = target
         change(Mode.READING, "準備中…")
         operate("read") {
             try {
                 val current = session ?: createSession(target, settings).also { session = it }
                 audio?.startOutput()
-                current.run()
+                current.run(startedAt)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -544,7 +545,7 @@ class ReaderAccessibility : AccessibilityService() {
         }
         this.audio = audio
         return ReaderSession(pagePort(target, createdOcr, settings), audio, pronunciations, ::onState,
-            startupBufferMs = 8_000, clock = SystemClock::elapsedRealtime, log = ReaderDiagnostics::event)
+            clock = SystemClock::elapsedRealtime, log = ReaderDiagnostics::event)
     }
 
     private fun onState(state: ReaderState) {
