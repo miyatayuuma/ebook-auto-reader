@@ -97,11 +97,6 @@ internal object ReflowLayout {
             lines += candidate
         }
         val substantive = lines.filter { it.type == 1 || it.type == 16 }
-        if (substantive.any { !it.complete || it.text.isBlank() } ||
-            substantive.isNotEmpty() && substantive.none { hasJapanese(it.text) }) {
-            reportClassification("kind=undetermined reason=incomplete_body")
-            throw ReaderFailure("本文候補の一部を認識できません。表示と文字サイズを確認してください。", "ocr_incomplete_body")
-        }
         val captions = lines.filter { it.type in setOf(2, 4, 5) && it.complete && hasJapanese(it.text) }
         val visuals = regions.filter { it.type in visualTypes && it.detection >= 0.68f &&
             it.box.area.toLong() >= width.toLong() * height * 0.04 }
@@ -137,6 +132,11 @@ internal object ReflowLayout {
             val b = region.box
             reportRegion("type=${region.type} box=${b.left.toDouble()/width},${b.top.toDouble()/height}," +
                 "${b.right.toDouble()/width},${b.bottom.toDouble()/height} confidence=${region.detection} reason=$reason")
+        }
+        if (substantive.any { !it.complete || it.text.isBlank() } ||
+            substantive.isNotEmpty() && substantive.none { hasJapanese(it.text) }) {
+            reportClassification("kind=undetermined reason=incomplete_body")
+            throw ReaderFailure("本文候補の一部を認識できません。表示と文字サイズを確認してください。", "ocr_incomplete_body")
         }
         val failedCaptions = lines.count { it.type in setOf(2, 4, 5) &&
             (!it.complete || it.text.isBlank() || !hasJapanese(it.text)) }
