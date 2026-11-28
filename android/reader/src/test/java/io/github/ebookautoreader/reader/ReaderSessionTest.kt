@@ -248,6 +248,21 @@ class ReaderSessionTest {
         assertEquals(audio.clips.size, audio.closedClips)
     }
 
+    @Test
+    fun pauseAfterEndDetectionRecapturesDiscardedOcrFramesOnResume() = runTest {
+        val pages = FakePages(listOf(body("最初です。"), body("最後です。"))).apply { readDelay = 300 }
+        val audio = FakeAudio()
+        val session = ReaderSession(pages, audio, Pronunciations(), {})
+        val first = async { session.run() }
+        advanceTimeBy(500)
+        first.cancelAndJoin()
+        assertTrue(session.restore())
+        val outcome = runCatching { session.run() }
+        assertEquals("page_unchanged", (outcome.exceptionOrNull() as? ReaderFailure)?.reason)
+        assertEquals(listOf("最初です。", "最初です。", "最後です。"), audio.starts)
+        assertEquals(pages.frames, pages.closedFrames)
+    }
+
     private fun body(vararg lines: String) = PageText(lines.map { SourceLine(it) }, PageKind.BODY)
 
     private class FakePages(private val pages: List<PageText>,

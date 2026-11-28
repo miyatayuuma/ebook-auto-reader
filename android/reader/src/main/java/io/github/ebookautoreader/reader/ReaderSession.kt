@@ -292,6 +292,7 @@ internal class ReaderSession(
     private suspend fun verifyOrStart() {
         if (!trusted) throw ReaderFailure("表示位置を確認できません。読書ページを開き直してください。")
         captureFinished = false
+        reachedFailure = null
         if (cursor == null) {
             update(state.copy(stage = ReaderStage.CAPTURE))
             val frame = pages.capture()
