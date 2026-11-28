@@ -73,7 +73,8 @@ class ReaderAccessibility : AccessibilityService() {
     private var registered = false
     private var debugRegistered = false
     private var targetMissing = false
-    private val pageNumberOcr = lazy { PageNumberOcr() }
+    private val pageNumberOcr = mutableMapOf<PageNumberModel, PageNumberOcr>()
+    private val pageNumberAttempts = mutableMapOf<PageNumberModel, Int>()
 
     private val speechPreferenceChanged = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "rate") {
@@ -109,7 +110,11 @@ class ReaderAccessibility : AccessibilityService() {
             }
             when (command) {
                 "capture" -> probe()
-                "page-number" -> diagnosePageNumber(target)
+                "page-number" -> {
+                    val models = PageNumberModel.selection(intent.getStringExtra("model"))
+                    if (models == null) ReaderDiagnostics.event("page_number result=error reason=invalid_model")
+                    else diagnosePageNumber(target, models)
+                }
                 "turn", "turn-headless" -> {
                     val methodName = intent.getStringExtra("method") ?: "TAP"
                     val method = TurnMethod.entries.firstOrNull { it.name == methodName }
@@ -407,42 +412,54 @@ class ReaderAccessibility : AccessibilityService() {
         }
     }
 
-    private fun diagnosePageNumber(target: ReaderWindow) {
+    private fun diagnosePageNumber(target: ReaderWindow, models: List<PageNumberModel>) {
         probeWindow = target
         change(Mode.PROBE, "ページ番号を認識中…")
         operate("page_number") {
             val started = SystemClock.elapsedRealtime()
             var captureMs: Long? = null
-            var ocrMs: Long? = null
-            var number: Int? = null
-            var result = "error"
+            var successful = false
             try {
                 val captureStart = SystemClock.elapsedRealtime()
                 val frame = try { pagePort(target).captureForPageNumber() } finally {
                     captureMs = SystemClock.elapsedRealtime() - captureStart
                 }
                 frame.use {
-                    val ocrStart = SystemClock.elapsedRealtime()
-                    try {
-                        val screen = manager.maximumWindowMetrics.bounds
-                        number = pageNumberOcr.value.read(it.bitmap, target.bounds, screen)
-                    } finally {
-                        ocrMs = SystemClock.elapsedRealtime() - ocrStart
+                    val screen = manager.maximumWindowMetrics.bounds
+                    for (model in models) {
+                        val attempt = (pageNumberAttempts[model] ?: 0) + 1
+                        pageNumberAttempts[model] = attempt
+                        val ocrStart = SystemClock.elapsedRealtime()
+                        var result = "error"
+                        var number: Int? = null
+                        try {
+                            val engine = pageNumberOcr.getOrPut(model) { PageNumberOcr(model) }
+                            number = engine.read(it.bitmap, target.bounds, screen)
+                            result = if (number == null) "unrecognized" else "ok"
+                            if (number != null) successful = true
+                        } catch (error: CancellationException) {
+                            result = "cancelled"
+                            throw error
+                        } catch (_: Exception) {
+                            // Exceptions may contain recognized book text; never log their messages.
+                        } finally {
+                            ReaderDiagnostics.event("page_number result=$result model=${model.argument}" +
+                                " phase=${if (attempt == 1) "first" else "subsequent"} attempt=$attempt" +
+                                " number=${number ?: "unknown"} captureMs=$captureMs" +
+                                " ocrMs=${SystemClock.elapsedRealtime() - ocrStart}" +
+                                " totalMs=${SystemClock.elapsedRealtime() - started}")
+                        }
                     }
                 }
-                result = if (number == null) "unrecognized" else "ok"
             } catch (error: CancellationException) {
-                result = "cancelled"
                 throw error
-            } catch (error: Exception) {
-                // Do not log OCR content or exception messages, which may contain book text.
-                result = "error"
-            } finally {
-                ReaderDiagnostics.event("page_number result=$result number=${number ?: "unknown"}" +
-                    " captureMs=${captureMs ?: -1} ocrMs=${ocrMs ?: -1}" +
+            } catch (_: Exception) {
+                ReaderDiagnostics.event("page_number result=error reason=capture_failed" +
+                    " captureMs=${captureMs ?: -1} ocrMs=-1" +
                     " totalMs=${SystemClock.elapsedRealtime() - started}")
+            } finally {
                 probeWindow = null
-                change(Mode.IDLE, if (number != null) "ページ番号を認識しました。" else "ページ番号を認識できませんでした。")
+                change(Mode.IDLE, if (successful) "ページ番号を認識しました。" else "ページ番号を認識できませんでした。")
             }
         }
     }
@@ -687,7 +704,8 @@ class ReaderAccessibility : AccessibilityService() {
         detachPanel()
         lifetime.invokeOnCompletion { mainExecutor.execute {
             clearSession()
-            if (pageNumberOcr.isInitialized()) pageNumberOcr.value.close()
+            pageNumberOcr.values.forEach { it.close() }
+            pageNumberOcr.clear()
         } }
         lifetime.cancel()
         super.onDestroy()

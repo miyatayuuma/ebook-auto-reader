@@ -125,3 +125,15 @@ adb logcat -d -s EbookReader:I | grep 'page_number result='
 ```
 
 `number` は認識番号、`captureMs` は画像取得、`ocrMs` は数字OCR、`totalMs` は全体のミリ秒。`result=unrecognized` は番号を特定できなかった場合、`result=error` は取得・処理失敗を表す。`-1` は当該処理を開始していないことを表す。本文、書名、画像はログに含めない。Pixel 9 の複数ページで番号と時間を目視照合する。初回は認識器の初期化を含むため、初回と2回目以降を分けて確認する。
+
+### 日本語・ラテン文字モデルの比較（P2.5A-1.1）
+
+`--es model japanese`、`latin`、`both` のいずれかを指定する。省略時は従来どおり日本語。`both` は **同じスクリーンショット**を日本語、ラテン文字の順に認識し、モデル別に `page_number` ログを1行ずつ出す。
+
+```bash
+adb shell am broadcast -a io.github.ebookautoreader.DEBUG_READER \
+  -p io.github.ebookautoreader.debug --es command page-number --es model both
+adb logcat -d -s EbookReader:I | grep 'page_number result=' | tail -n 2
+```
+
+`phase=first` はアクセシビリティサービス起動後、そのモデルを初めて呼び出した試行で、`phase=subsequent` は2回目以降。`attempt` はモデルごとの試行回数。初回が失敗した場合、2回目が十分ウォーム状態とは限らない。認識器はサービス存続中はモデルごとに再利用する。`captureMs` は共通、`ocrMs` は各モデル単独の処理時間、`totalMs` は診断開始から各モデルの完了までの累積時間なので、両者の速度比較には `ocrMs` を使う。処理順序の影響もあり得るため、単独実行も比較する。複数ページで表示番号と照合し、精度と初回・2回目以降の処理時間を記録する。画像、書籍名、本文は保存・出力しない。

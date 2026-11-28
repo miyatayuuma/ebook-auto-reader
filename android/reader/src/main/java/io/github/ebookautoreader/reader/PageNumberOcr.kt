@@ -6,6 +6,7 @@ import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.ceil
@@ -23,8 +24,24 @@ internal object PageNumberParser {
     }
 }
 
-internal class PageNumberOcr : AutoCloseable {
-    private val recognizer = TextRecognition.getClient(JapaneseTextRecognizerOptions.Builder().build())
+internal enum class PageNumberModel(val argument: String) {
+    JAPANESE("japanese"), LATIN("latin");
+
+    companion object {
+        fun selection(argument: String?): List<PageNumberModel>? = when (argument) {
+            null, "japanese" -> listOf(JAPANESE)
+            "latin" -> listOf(LATIN)
+            "both" -> listOf(JAPANESE, LATIN)
+            else -> null
+        }
+    }
+}
+
+internal class PageNumberOcr(model: PageNumberModel) : AutoCloseable {
+    private val recognizer = when (model) {
+        PageNumberModel.JAPANESE -> TextRecognition.getClient(JapaneseTextRecognizerOptions.Builder().build())
+        PageNumberModel.LATIN -> TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    }
 
     suspend fun read(bitmap: Bitmap, window: Rect, screen: Rect): Int? = withContext(Dispatchers.IO) {
         // Screenshot pixels are relative to the captured window, not the display.
