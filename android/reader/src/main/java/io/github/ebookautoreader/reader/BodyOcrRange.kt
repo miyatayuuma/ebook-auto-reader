@@ -7,7 +7,7 @@ import kotlin.math.ceil
  * Coordinates of recognized lines remain relative to the original screenshot.
  */
 internal object BodyOcrRange {
-    const val BUILD = "p25c2-crop1"
+    const val BUILD = "p25c2-crop2"
     const val HEADER_BOTTOM = 0.11
 
     fun topFraction(screenTop: Int, screenHeight: Int, windowTop: Int, windowHeight: Int): Double {

@@ -108,7 +108,11 @@ internal object ReflowLayout {
                         region.box.intersection(line.box).toLong() >= line.box.area.toLong() * .85 &&
                         region.box.area.toLong() <= line.box.area.toLong() * 1.25
                 }
-                !header && !duplicate && !textDuplicate
+                // NDLOCR may emit a text-block structure (type 0) around multiple
+                // caption lines separately from the illustration. It is not an
+                // unknown structure if the recognized lines explain its bounds.
+                val captionBlock = region.type == 0 && explainedCaptionBlock(region.box, captions)
+                !header && !duplicate && !textDuplicate && !captionBlock
             }
         for (region in regions) {
             val reason = headerReason(region, ignored) ?: when {
@@ -160,6 +164,21 @@ internal object ReflowLayout {
         return PageText(ordered.map { SourceLine(it.text, ruby[it].orEmpty(), it.box.let { box ->
             LineBounds(box.left, box.top, box.right, box.bottom)
         }) }, kind)
+    }
+
+    private fun explainedCaptionBlock(block: Box, captions: List<Region>): Boolean {
+        if (block.area <= 0) return false
+        val inside = captions.map { it.box }.filter { it.area > 0 &&
+            block.intersection(it).toLong() >= it.area.toLong() * .85 }
+        if (inside.isEmpty()) return false
+        val envelope = Box(inside.minOf { it.left }, inside.minOf { it.top },
+            inside.maxOf { it.right }, inside.maxOf { it.bottom })
+        val overlap = block.intersection(envelope).toLong()
+        // Require mutual coverage, not just that the block contains some text.
+        // The 50% line-area floor rejects a large unexplained gap between lines.
+        return overlap >= block.area.toLong() * .85 &&
+            overlap >= envelope.area.toLong() * .85 &&
+            inside.sumOf { block.intersection(it).toLong() } >= block.area.toLong() * .5
     }
 
     private fun hasJapanese(text: String) = text.any { it in 'ぁ'..'ヿ' || it in '㐀'..'鿿' }

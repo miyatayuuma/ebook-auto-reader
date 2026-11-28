@@ -11,7 +11,7 @@ android {
         minSdk = 34
         targetSdk = 35
         versionCode = 5
-        versionName = "p2.5c2-crop1"
+        versionName = "p2.5c2-crop2"
         ndk { abiFilters += "arm64-v8a" }
     }
     buildTypes {

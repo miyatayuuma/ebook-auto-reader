@@ -129,6 +129,36 @@ class ReflowLayoutTest {
     }
 
     @Test
+    fun separatelyGroupedTwoLineCaptionDoesNotBlockFigure() {
+        // Synthetic geometry representing a figure with an independent,
+        // closely fitting two-line caption block below it.
+        val figure = Region(Box(80, 330, 1000, 1020), 6, .98f)
+        val block = Region(Box(80, 1035, 1000, 1122), 0, .97f)
+        val first = Region(Box(82, 1035, 1000, 1071), 2, .94f, "一行目の説明。")
+        val second = Region(Box(80, 1088, 690, 1123), 2, .94f, "二行目の説明。")
+        val regions = listOf(figure, block, first, second)
+        val events = mutableListOf<String>()
+        val page = ReflowLayout.read(regions, 1080, 2424, false, reportRegion = events::add)
+        assertEquals(PageKind.FIGURE, page.kind)
+        assertEquals(listOf(first.text, second.text), page.lines.map { it.original })
+        assertTrue(events.any { it.contains("type=0") && it.contains("reason=duplicate_structure") })
+        // Missing recognition, unexplained space, or an unrelated structure
+        // must not be silently passed as an illustration.
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(figure, block, first, second.copy(text = "", complete = false)), 1080, 2424, false)
+        }
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(figure, block, first), 1080, 2424, false)
+        }
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(figure, block.copy(box = Box(80, 1035, 1000, 1600)), first, second), 1080, 2424, false)
+        }
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(listOf(figure, block.copy(type = 3), first, second), 1080, 2424, false)
+        }
+    }
+
+    @Test
     fun enclosingIllustrationAndCaptionNeedsTightExplainedBounds() {
         val image = Region(Box(50, 150, 450, 750), 6, .94f)
         val caption = Region(Box(100, 760, 400, 790), 2, .9f, "図の説明。")
