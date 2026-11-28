@@ -95,9 +95,6 @@ internal class ReaderSession(
     private var readingFrame = false
 
     private fun retainedFrames() = frames.size + if (readingFrame) 1 else 0
-    private var eyeRequestPage: Int? = null
-    private var eyeBurstAnchor: Int? = null
-    private var turnEstimateMs = EyePrefetchPlan.INITIAL_TURN_MS
     private var captured = -1
     private var captureFinished = false
     private val changes = MutableStateFlow(0L)
@@ -150,8 +147,6 @@ internal class ReaderSession(
             // Keep the source units for replay, and release every prepared player and WAV.
             frames.forEach { it.frame.close() }
             frames.clear()
-            eyeRequestPage = null
-            eyeBurstAnchor = null
             captured = decoded
             captureFinished = false
             pending.forEach { entry ->
@@ -192,7 +187,10 @@ internal class ReaderSession(
                 }
 
                 val unit = requireNotNull(current).unit
-                if (readingMode == ReadingMode.EYES) awaitEyePage(unit.start.page)
+                if (readingMode == ReadingMode.EYES &&
+                    (!trusted || state.displayed != unit.start.page || unit.start.page != unit.end.page)) {
+                    throw ReaderFailure("読み上げ位置と表示位置が一致しません。", "eye_position_mismatch")
+                }
                 var startedAt: Long? = null
                 audio.play(clip, started = {
                     val now = clock()
@@ -211,11 +209,7 @@ internal class ReaderSession(
                 lastStartPage = unit.start.page
                 pending.removeFirst()
                 clip.close()
-                eyeRequestPage = null
-                // A burst may still be returning when a clip ends. Retain its anchor
-                // and every intervening known page until the navigation owner returns.
-                val keepFrom = minOf(unit.end.page, requireNotNull(cursor).index,
-                    eyeBurstAnchor ?: Int.MAX_VALUE)
+                val keepFrom = minOf(unit.end.page, requireNotNull(cursor).index)
                 known.keys.removeAll { it < keepFrom }
                 update(state.copy(playing = null, completed = unit.end, confirmed = unit.end,
                     milliseconds = 0, stage = ReaderStage.NEXT))
@@ -225,132 +219,39 @@ internal class ReaderSession(
         }
     }
 
-    private suspend fun awaitEyePage(page: Int) {
-        eyeRequestPage = page
-        update(state)
-        changes.first {
-            trusted && state.displayed == page && eyeBurstAnchor == null
-        }
-    }
-
-    private fun eyeAnchor(): Int = eyeRequestPage
-        ?: pending.firstOrNull()?.unit?.start?.page
-        ?: sentences.oldestPage()
-        ?: state.confirmed?.page
-        ?: 0
-
-    // Only use synthesized audio that is known to stay on the displayed page.
-    // A cross-page clip has no verified time-to-character alignment.
-    private fun eyeRemainingMs(page: Int): Long {
-        if (state.playing?.page != page || eyeRequestPage != page) return 0
-        var sourceMs = 0L
-        for (entry in pending) {
-            if (entry.unit.start.page != page || entry.unit.end.page != page) break
-            val clip = entry.clip ?: break
-            sourceMs += clip.durationMs
-        }
-        return ((sourceMs - state.milliseconds).coerceAtLeast(0) / audio.rate.toDouble()).toLong()
-    }
-
-    private suspend fun navigateKnown(target: Int) {
-        val visible = requireNotNull(cursor).index
-        val path = minOf(visible, target)..maxOf(visible, target)
-        if (path.last - path.first > AHEAD_PAGES || path.any { it !in known }) {
-            throw ReaderFailure("確認済みのページ経路がありません。", "page_position_unknown")
-        }
-        while (requireNotNull(cursor).index != target) {
-            val from = requireNotNull(cursor).index
-            val forward = from < target
-            move(forward, from + if (forward) 1 else -1).close()
-        }
-    }
-
-    private fun eyeDepth(anchor: Int, limit: Int): Int {
-        val free = MAX_RETAINED_FRAMES - retainedFrames()
-        val ahead = limit - captured
-        if (free <= 0 || ahead <= 0) return 0
-        if (state.playing != null) {
-            return EyePrefetchPlan.depth(eyeRemainingMs(anchor), turnEstimateMs,
-                (captured - anchor).coerceAtLeast(0), free, ahead)
-        }
-        // Do not delay a ready clip. If no clip is ready, collect at most two
-        // nearby frames before returning; further trips require exhausted OCR input.
-        if (pending.firstOrNull()?.clip != null) return 0
-        if (retainedFrames() > 0 && captured >= anchor + 2) return 0
-        return minOf(2, free, ahead)
-    }
-
-    private suspend fun eyeBurst(anchor: Int, depth: Int) {
-        eyeBurstAnchor = anchor
-        update(state)
-        log("eye prefetch start anchor=$anchor frontier=$captured depth=$depth turnMs=$turnEstimateMs remainingMs=${eyeRemainingMs(anchor)}")
-        try {
-            // Navigation and captures are owned by this coroutine only.
-            navigateKnown(maxOf(0, captured))
-            repeat(depth) {
-                if (reachedFailure != null || retainedFrames() >= MAX_RETAINED_FRAMES ||
-                    eyeAnchor() != anchor) return@repeat
-                // A newly ready first clip takes priority over an extra capture.
-                if (state.playing == null && pending.firstOrNull()?.clip != null) return@repeat
-                if (state.playing != null && EyePrefetchPlan.depth(eyeRemainingMs(anchor),
-                        turnEstimateMs, (requireNotNull(cursor).index - anchor).coerceAtLeast(0),
-                        1, 1) == 0) return@repeat
-                try {
-                    captureNext()
-                } catch (failure: ReaderFailure) {
-                    if (failure.reason != "page_unchanged" || !trusted) throw failure
-                    reachedFailure = failure
-                    log("prefetch stopped reason=${failure.reason}")
-                }
-            }
-            // Return immediately after image capture, never after body OCR.
-            navigateKnown(anchor)
-            log("eye prefetch restored anchor=$anchor frontier=$captured")
-        } finally {
-            eyeBurstAnchor = null
-            update(state)
-        }
-    }
-
+    // EYES owns one visible page at a time. A forward move is legal only after
+    // every unit on the current page has completed and OCR is no longer in flight.
+    // No speculative excursion or return trip is permitted.
     private suspend fun produceEyePages() {
         var lastCheck = clock()
         try {
             while (true) {
                 val version = changes.value
-                val anchor = eyeAnchor()
                 val visible = requireNotNull(cursor).index
-                val limit = anchor + AHEAD_PAGES
-                if (reachedFailure != null && !captureFinished) {
-                    captureFinished = true
-                    update(state)
-                }
-                // Even after the final capture, pending audio can require display moves.
-                if (visible != anchor) {
-                    navigateKnown(anchor)
+                if (reachedFailure != null) return
+                if (decoded == captured && !readingFrame && frames.isEmpty() &&
+                    pending.isEmpty() && !sentences.hasUnit()) {
+                    // Resume may be on a verified preceding page after cancellation.
+                    if (visible < captured) {
+                        move(forward = true, target = visible + 1).close()
+                    } else {
+                        captureNext()
+                    }
                     lastCheck = clock()
                     continue
                 }
-                if (reachedFailure == null) {
-                    val depth = eyeDepth(anchor, limit)
-                    if (depth > 0) {
-                        eyeBurst(anchor, depth)
-                        lastCheck = clock()
-                        continue
-                    }
-                    if (decoded >= limit && pending.isEmpty() && !sentences.hasUnit()) {
-                        if (sentences.oldestPage() == null) {
-                            throw ReaderFailure("先読み範囲内に本文がありません。表示を確認してください。")
-                        }
-                        sentences.flush()
-                        update(state)
-                        continue
-                    }
-                }
-                if (clock() - lastCheck >= 3_000) {
+                val remaining = (3_000L - (clock() - lastCheck)).coerceAtLeast(0L)
+                if (remaining == 0L) {
                     verifyCursor()
                     lastCheck = clock()
-                } else changes.first { it != version }
+                } else kotlinx.coroutines.withTimeoutOrNull(remaining) {
+                    changes.first { it != version }
+                }
             }
+        } catch (failure: ReaderFailure) {
+            reachedFailure = failure
+            log("prefetch stopped reason=${failure.reason}")
+            if (!trusted) throw failure
         } finally {
             captureFinished = true
             update(state)
@@ -530,6 +431,10 @@ internal class ReaderSession(
             throw ReaderFailure("本文を確認できません。")
         }
         sentences.add(index, page)
+        // On a cold page, the next page is not observable without leaving this one.
+        // Flush only the speech boundary; preserve source characters and reading maps.
+        // EARS retains the original cross-page sentence concatenation.
+        if (readingMode == ReadingMode.EYES) sentences.flush()
         decoded = index
         update(state.copy(ocr = index, stage = if (state.playing == null) ReaderStage.NEXT else ReaderStage.PLAYBACK))
     }
@@ -569,7 +474,6 @@ internal class ReaderSession(
         if (!trusted) throw reachedFailure ?: ReaderFailure("表示位置を確認できません。", "page_position_unknown")
         val from = requireNotNull(cursor)
         val expected = known[target]
-        val turnStarted = clock()
         val turn = try {
             pages.prepareTurn(forward, from.signature)
         } catch (failure: ReaderFailure) {
@@ -603,7 +507,6 @@ internal class ReaderSession(
                     throw ReaderFailure("送り先のページを確認できません。表示位置を確認してください。", "page_position_unknown")
                 }
                 register(KnownPage(target, frame.signature, frame.pageNumber ?: expected?.pageNumber, frame.headerSignature))
-                turnEstimateMs = EyePrefetchPlan.updateEstimate(turnEstimateMs, clock() - turnStarted)
             }
             currentCoroutineContext().ensureActive()
             return requireNotNull(result)
