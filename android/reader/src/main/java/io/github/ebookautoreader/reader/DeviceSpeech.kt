@@ -94,10 +94,12 @@ internal enum class TtsStage(val label: String) {
     CONNECT("Googleの音声エンジンに接続中"), SYNTHESIZE("音声を合成中"), PREPARE_PLAYBACK("音声を再生準備中"),
 }
 
-internal class DeviceSpeech(private val context: Context, private val engine: String = GOOGLE_TTS) :
+internal class DeviceSpeech(private val context: Context, private val engine: String = GOOGLE_TTS,
+    private val measureSynthesis: Boolean = false) :
     Closeable {
     private var tts: TextToSpeech? = null
     private val completed = ConcurrentHashMap<String, CompletableDeferred<Int>>()
+    private val probes = ConcurrentHashMap<String, SynthesisProbe>()
 
     private suspend fun initialize(): TextToSpeech =
         tts ?: ReaderDiagnostics.measure("tts connect") { connect() }
@@ -118,6 +120,15 @@ internal class DeviceSpeech(private val context: Context, private val engine: St
             speech.setAudioAttributes(speechAttributes)
             speech.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String) = Unit
+                override fun onBeginSynthesis(utteranceId: String, sampleRateInHz: Int, audioFormat: Int, channelCount: Int) {
+                    probes[utteranceId]?.format(sampleRateInHz, audioFormat, channelCount)
+                }
+                override fun onAudioAvailable(utteranceId: String, audio: ByteArray) {
+                    probes[utteranceId]?.audio(audio.size)
+                }
+                override fun onRangeStart(utteranceId: String, start: Int, end: Int, frame: Int) {
+                    probes[utteranceId]?.range(start, end, frame)
+                }
                 override fun onDone(utteranceId: String) = finish(utteranceId, TextToSpeech.SUCCESS)
                 @Deprecated("Kept for engines that return no error code")
                 override fun onError(utteranceId: String) = finish(utteranceId, TextToSpeech.ERROR)
@@ -186,6 +197,7 @@ internal class DeviceSpeech(private val context: Context, private val engine: St
                 val id = UUID.randomUUID().toString()
                 val result = CompletableDeferred<Int>()
                 completed[id] = result
+                if (measureSynthesis && BuildConfig.DEBUG) probes[id] = SynthesisProbe(text.length)
                 val code = try {
                     val submitted = speech.synthesizeToFile(text, Bundle(), wav, id)
                     ReaderDiagnostics.event("tts submit result=$submitted")
@@ -194,6 +206,7 @@ internal class DeviceSpeech(private val context: Context, private val engine: St
                         ?: throw ReaderFailure("Googleの音声合成から応答がありません。", "tts_timeout")
                 } finally {
                     completed.remove(id)
+                    probes.remove(id)?.let { ReaderDiagnostics.event(it.summary()) }
                     if (!result.isCompleted) speech.stop()
                 }
                 ReaderDiagnostics.event("tts synthesis result=$code")

@@ -35,7 +35,7 @@ import kotlin.math.roundToInt
 class ReaderActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val preferences by lazy { ReaderPreferences(this) }
-    private val speech by lazy { DeviceSpeech(this) }
+    private val speech by lazy { DeviceSpeech(this, measureSynthesis = BuildConfig.DEBUG) }
     private lateinit var serviceInfo: TextView
     private lateinit var voiceInfo: TextView
     private lateinit var voices: Spinner
