@@ -10,6 +10,15 @@ class TimingTest {
         t.audio(10700,true);assertEquals(Due.NONE,t.due(12000))
         t.audio(12000,false);assertEquals(Due.READ_END,t.due(12800))
     }
+    @Test fun transitionAnnouncementIsNotReadEnd(){
+        val t=Timing(800,1500)
+        t.reset(0,false,1200)
+        t.audio(100,true);t.audio(600,false)
+        assertEquals(Due.NONE,t.due(1400))
+        assertEquals(Due.NO_SPEECH,t.due(2100))
+        t.audio(2200,true);t.audio(3500,false)
+        assertEquals(Due.READ_END,t.due(4300))
+    }
     @Test fun resetDisarmsOldRead(){
         val t=Timing(800,1500);t.reset(0,true);t.audio(100,false)
         t.reset(200,false);assertEquals(Due.NONE,t.due(1000));assertEquals(Due.NO_SPEECH,t.due(1700))
