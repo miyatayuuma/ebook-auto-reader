@@ -140,6 +140,16 @@ class ReaderSessionTest {
     }
 
     @Test
+    fun figureContinuesPrefetchToFollowingBody() = runTest {
+        val pages = FakePages(listOf(body("最初です。"), PageText(emptyList(), PageKind.FIGURE), body("続きです。")))
+        val audio = FakeAudio()
+        val session = ReaderSession(pages, audio, Pronunciations(), {})
+        runCatching { session.run() }
+        assertEquals(listOf(0, 1, 2), pages.decoded)
+        assertEquals(listOf("最初です。", "[図表]", "続きです。"), audio.starts)
+    }
+
+    @Test
     fun unreadablePageDoesNotTriggerAnotherTurn() = runTest {
         val pages = FakePages(listOf(body("晴れです。"), body(""), body("読まれません。")))
         val audio = FakeAudio()
