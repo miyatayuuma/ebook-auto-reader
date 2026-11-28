@@ -9,8 +9,8 @@ android {
         applicationId = "io.github.ebookautoreader.lite"
         minSdk = 34
         targetSdk = 35
-        versionCode = 1
-        versionName = "p2.7-lite-1"
+        versionCode = 2
+        versionName = "p2.7-lite-2"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
