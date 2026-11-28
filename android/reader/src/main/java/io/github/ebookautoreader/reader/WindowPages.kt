@@ -20,7 +20,7 @@ import kotlin.coroutines.resumeWithException
 
 internal data class ReaderWindow(val id: Int, val owner: String, val bounds: Rect)
 
-internal class ScreenFrame(val bitmap: Bitmap, override val signature: PageSignature, val uniformLight: Boolean, val headerSignature: PageSignature, override var pageNumber: Int? = null) :
+internal class ScreenFrame(val bitmap: Bitmap, override val signature: PageSignature, val uniformLight: Boolean, override val headerSignature: PageSignature, override var pageNumber: Int? = null) :
     PageFrame {
     override fun close() = bitmap.recycle()
 }

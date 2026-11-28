@@ -304,15 +304,32 @@ class ReaderSessionTest {
     }
 
     @Test
-    fun cancellingDispatchedTurnLeavesPositionUnknownAndDoesNotRepeatInput() = runTest {
+    fun cancellingDispatchedTurnCanConfirmUnchangedOriginWithoutRepeatingInput() = runTest {
         val pages = FakePages(listOf(body("一です。"), body("二です。"))).apply { turnDelay = 5_000 }
         val session = ReaderSession(pages, FakeAudio(), Pronunciations(), {})
         val first = async { session.run() }
         advanceTimeBy(500)
         assertEquals(listOf(true), pages.turns)
         first.cancelAndJoin()
+        assertTrue(session.restore())
+        assertEquals(listOf(true), pages.turns)
+    }
+
+    @Test
+    fun cancelledTurnToUnknownPageCannotGuessOrRestore() = runTest {
+        val pages = FakePages(listOf(body("一です。"), body("二です。"))).apply {
+            turnDelay = 5_000
+            numbers = listOf(10, 11)
+        }
+        val session = ReaderSession(pages, FakeAudio(), Pronunciations(), {})
+        val first = async { session.run() }
+        advanceTimeBy(500)
+        first.cancelAndJoin()
+        // Android may already have delivered a cancelled coroutine's gesture.
+        pages.display = 1
         assertFalse(session.restore())
         assertEquals(listOf(true), pages.turns)
+        assertEquals(pages.frames, pages.closedFrames)
     }
 
     private fun body(vararg lines: String) = PageText(lines.map { SourceLine(it) }, PageKind.BODY)

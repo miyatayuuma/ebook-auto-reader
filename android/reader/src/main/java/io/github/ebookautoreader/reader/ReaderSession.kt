@@ -14,6 +14,7 @@ internal class ReaderFailure(message: String, val reason: String = "reader_failu
 internal interface PageFrame : Closeable {
     val signature: PageSignature
     val pageNumber: Int? get() = null
+    val headerSignature: PageSignature? get() = null
 }
 internal interface ReaderPages {
     suspend fun capture(): PageFrame
@@ -60,7 +61,13 @@ internal class ReaderSession(
         const val MAX_CLIPS = 8
     }
 
-    private data class KnownPage(val index: Int, val signature: PageSignature, val pageNumber: Int?)
+    private data class KnownPage(
+        val index: Int, val signature: PageSignature, val pageNumber: Int?, val header: PageSignature?,
+    ) {
+        fun matches(frame: PageFrame) = frame.signature.matches(signature) &&
+            (header == null || frame.headerSignature?.identical(header) == true) &&
+            (pageNumber == null || frame.pageNumber == null || pageNumber == frame.pageNumber)
+    }
     private data class CapturedPage(val index: Int, val frame: PageFrame)
     private class Pending(val unit: ReadingUnit, var clip: ReaderClip? = null)
 
@@ -294,7 +301,7 @@ internal class ReaderSession(
             update(state.copy(stage = ReaderStage.CAPTURE))
             val frame = pages.capture()
             milestone("capture")
-            register(KnownPage(0, frame.signature, frame.pageNumber))
+            register(KnownPage(0, frame.signature, frame.pageNumber, frame.headerSignature))
             frames.addLast(CapturedPage(0, frame))
             captured = 0
             update(state)
@@ -352,8 +359,7 @@ internal class ReaderSession(
             update(state.copy(displayed = null))
             throw failure
         }
-        if (frame.signature.matches(expected.signature) &&
-            (frame.pageNumber == null || expected.pageNumber == null || frame.pageNumber == expected.pageNumber)) return frame
+        if (expected.matches(frame)) return frame
         frame.close()
         trusted = false
         update(state.copy(displayed = null))
@@ -385,11 +391,10 @@ internal class ReaderSession(
                 update(state.copy(displayed = null))
                 val frame = turn()
                 result = frame
-                val matches = if (expected != null) frame.signature.matches(expected.signature) &&
-                    (expected.pageNumber == null || frame.pageNumber == null || expected.pageNumber == frame.pageNumber)
+                val matches = if (expected != null) expected.matches(frame)
                     else forward && recent.all { frame.signature.compare(it) == PageComparison.DIFFERENT }
                 if (frame.signature.matches(from.signature)) {
-                    if (from.pageNumber != null && frame.pageNumber != null && from.pageNumber != frame.pageNumber) {
+                    if (!from.matches(frame)) {
                         throw ReaderFailure("画面とページ番号が一致しません。", "page_position_unknown")
                     }
                     // The source confirmed stable captures with the original page.
@@ -403,7 +408,7 @@ internal class ReaderSession(
                     }
                     throw ReaderFailure("送り先のページを確認できません。表示位置を確認してください。", "page_position_unknown")
                 }
-                register(KnownPage(target, frame.signature, frame.pageNumber))
+                register(KnownPage(target, frame.signature, frame.pageNumber ?: expected?.pageNumber, frame.headerSignature))
             }
             currentCoroutineContext().ensureActive()
             return requireNotNull(result)
@@ -428,10 +433,7 @@ internal class ReaderSession(
                 return false
             }
             val verified = frame.use {
-                known.values.filter { page -> kotlin.math.abs(page.index - origin.index) <= 1 &&
-                    frame.signature.matches(page.signature) &&
-                    (page.pageNumber == null || frame.pageNumber == null || page.pageNumber == frame.pageNumber)
-                }.singleOrNull()
+                known.values.filter { page -> kotlin.math.abs(page.index - origin.index) <= 1 && page.matches(frame) }.singleOrNull()
             }
             if (verified == null) {
                 restoreFailure = ReaderFailure("中断後の位置を確定できません。", "page_position_unknown")
