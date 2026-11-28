@@ -8,36 +8,34 @@ internal data class DigitMatch(val number: Int?, val error: Double?, val gap: Do
 
 /** In-memory observations only. A template is usable after two consistent observations. */
 internal class DigitTemplates {
-    private val samples = arrayOfNulls<FloatArray>(10)
-    private val counts = IntArray(10)
-    val learned: Int get() = counts.count { it >= 2 }
-    fun clear() { samples.fill(null); counts.fill(0) }
+    private val samples = Array(10) { mutableListOf<FloatArray>() }
+    private val pages = Array(10) { mutableSetOf<String>() }
+    val learned: Int get() = pages.count { it.size >= 2 }
+    fun clear() { samples.forEach { it.clear() }; pages.forEach { it.clear() } }
     private fun distance(a: FloatArray, b: FloatArray): Double =
         a.indices.sumOf { abs(a[it] - b[it]).toDouble() } / a.size
 
-    fun observe(digits: List<FloatArray>, label: String) {
-        if (digits.size != label.length || label.isEmpty() || label.length > 4 || label.any { it !in '0'..'9' }) return
-        if (digits.any { it.size != 560 }) return
-        // Reject a conflicting entire observation: never partially train a wrongly segmented page.
+    fun observe(digits: List<FloatArray>, label: String): String {
+        if (digits.size != label.length || label.isEmpty() || label.length > 4 || label.any { it !in '0'..'9' } || digits.any { it.size != 560 }) return "invalid_segments"
         for ((index, char) in label.withIndex()) {
             val n = char - '0'
-            val existing = samples[n]
-            if (existing != null && distance(existing, digits[index]) > 0.04) { clear(); return }
-            for (other in 0..9) {
-                if (other != n && samples[other] != null && distance(samples[other]!!, digits[index]) < 0.08) return
-            }
+            if (samples[n].isNotEmpty() && samples[n].minOf { distance(it, digits[index]) } > 0.04) return "same_digit_mismatch"
+            for (other in 0..9) if (other != n && samples[other].any { distance(it, digits[index]) < 0.08 }) return "digit_collision"
         }
-        // Repeated labels on this page must agree with each other as well.
         for (i in label.indices) for (j in 0 until i) {
-            if (label[i] == label[j] && distance(digits[i], digits[j]) > 0.04) return
-            if (label[i] != label[j] && distance(digits[i], digits[j]) < 0.08) return
+            val d = distance(digits[i], digits[j])
+            if (label[i] == label[j] && d > 0.04) return "same_page_mismatch"
+            if (label[i] != label[j] && d < 0.08) return "same_page_collision"
         }
+        var added = false
         for ((i, char) in label.withIndex()) {
             val n = char - '0'
-            if (samples[n] == null) samples[n] = digits[i].copyOf()
-            // Count at most once per page observation, not repeated digits on one page.
-            if (label.indexOf(char) == i) counts[n]++
+            if (pages[n].add(label)) {
+                if (samples[n].size < 3) samples[n].add(digits[i].copyOf())
+                added = true
+            }
         }
+        return if (added) "accepted" else "duplicate_page"
     }
 
     fun match(digits: List<FloatArray>): DigitMatch {
@@ -47,7 +45,7 @@ internal class DigitTemplates {
         var worst = 0.0
         var narrowest = Double.POSITIVE_INFINITY
         for (digit in digits) {
-            val scores = (0..9).map { it to distance(samples[it]!!, digit) }.sortedBy { it.second }
+            val scores = (0..9).map { it to samples[it].minOf { sample -> distance(sample, digit) } }.sortedBy { it.second }
             val best = scores[0]
             val gap = scores[1].second - best.second
             worst = maxOf(worst, best.second)
@@ -60,7 +58,8 @@ internal class DigitTemplates {
     }
 }
 
-internal data class DigitSegments(val glyphs: List<FloatArray>, val height: Int, val background: Int)
+internal data class GlyphBounds(val left: Int, val top: Int, val right: Int, val bottom: Int)
+internal data class DigitSegments(val glyphs: List<FloatArray>, val height: Int, val background: Int, val bounds: List<GlyphBounds>)
 
 internal object DigitSegmentation {
     fun fromGray(pixels: IntArray, width: Int, height: Int): DigitSegments? {
@@ -81,6 +80,7 @@ internal object DigitSegmentation {
         }
         if (runs.isEmpty()) return null
         val glyphs = mutableListOf<FloatArray>()
+        val bounds = mutableListOf<GlyphBounds>()
         var typicalHeight = 0
         for ((index, run) in runs.withIndex()) {
             if (index > 0) {
@@ -104,9 +104,10 @@ internal object DigitSegmentation {
                 normal[dy * 20 + dx] = (background - pixels[sy * width + sx]).coerceIn(0, background) / background.toFloat()
             }
             glyphs.add(normal)
+            bounds.add(GlyphBounds(run.first, top, run.last + 1, bottom + 1))
             if (glyphs.size > 4) return null
         }
-        return DigitSegments(glyphs, typicalHeight, background).takeIf { it.glyphs.isNotEmpty() }
+        return DigitSegments(glyphs, typicalHeight, background, bounds).takeIf { it.glyphs.isNotEmpty() }
     }
 
     fun fromBitmap(bitmap: Bitmap): DigitSegments? {
@@ -123,25 +124,30 @@ internal object DigitSegmentation {
 internal class TemplatePageNumberOcr {
     private val templates = DigitTemplates()
     private var conditions: String? = null
-    private var lastHeight: Int? = null
-    private var lastBackground: Int? = null
+    private var resetReason = "new_session"
     val learned: Int get() = templates.learned
+    fun reset(reason: String) { templates.clear(); conditions = null; resetReason = reason }
+    fun takeResetReason(): String = resetReason.also { resetReason = "none" }
 
-    fun analyze(bitmap: Bitmap, window: Rect, screen: Rect): Pair<DigitSegments?, DigitMatch> {
-        val signature = "${bitmap.width}x${bitmap.height}:${window.flattenToString()}:${screen.flattenToString()}"
-        if (conditions != signature) { templates.clear(); conditions = signature; lastHeight = null; lastBackground = null }
+    fun analyze(bitmap: Bitmap, window: Rect, screen: Rect, windowId: Int): Pair<DigitSegments?, DigitMatch> {
+        val signature = "$windowId:${bitmap.width}x${bitmap.height}:${window.flattenToString()}:${screen.flattenToString()}"
+        if (conditions != signature) {
+            if (conditions != null) { templates.clear(); resetReason = "display_or_window_changed" }
+            conditions = signature
+        }
         val crop = PageHeaderCrop.crop(bitmap, window, screen) ?: return null to DigitMatch(null, null, null, "crop")
         val segments = try { DigitSegmentation.fromBitmap(crop) } finally { if (crop !== bitmap) crop.recycle() }
-        if (segments != null) {
-            if (lastHeight?.let { abs(it - segments.height) > maxOf(2, it / 6) } == true ||
-                lastBackground?.let { abs(it - segments.background) > 20 } == true) templates.clear()
-            lastHeight = segments.height
-            lastBackground = segments.background
-        }
         return segments to if (segments == null) DigitMatch(null, null, null, "segmentation") else templates.match(segments.glyphs)
     }
 
-    fun learn(segments: DigitSegments?, number: Int?) {
-        if (segments != null && number != null) templates.observe(segments.glyphs, number.toString())
+    fun learn(segments: DigitSegments?, result: PageNumberResult): String {
+        val number = result.number ?: return "mlkit_unrecognized"
+        val boxes = result.digitBoxes ?: return "mlkit_positions_unavailable"
+        if (segments == null || segments.bounds.size != boxes.size) return "segment_count_mismatch"
+        if (segments.bounds.zip(boxes).any { (glyph, box) ->
+                val x = (glyph.left + glyph.right) / 2; val y = (glyph.top + glyph.bottom) / 2
+                !box.contains(x, y) || glyph.left < box.left - 2 || glyph.right > box.right + 2
+            }) return "position_mismatch"
+        return templates.observe(segments.glyphs, number.toString())
     }
 }

@@ -58,6 +58,8 @@ internal object PageHeaderCrop {
     }
 }
 
+internal data class PageNumberResult(val number: Int?, val digitBoxes: List<Rect>?)
+
 internal class PageNumberOcr(model: PageNumberModel) : AutoCloseable {
     private val recognizer = when (model) {
         PageNumberModel.JAPANESE -> TextRecognition.getClient(JapaneseTextRecognizerOptions.Builder().build())
@@ -65,13 +67,23 @@ internal class PageNumberOcr(model: PageNumberModel) : AutoCloseable {
         PageNumberModel.TEMPLATE -> error("Template mode uses TemplatePageNumberOcr")
     }
 
-    suspend fun read(bitmap: Bitmap, window: Rect, screen: Rect): Int? = withContext(Dispatchers.IO) {
-        val crop = PageHeaderCrop.crop(bitmap, window, screen) ?: return@withContext null
+    suspend fun read(bitmap: Bitmap, window: Rect, screen: Rect): Int? = readDetailed(bitmap, window, screen).number
+
+    suspend fun readDetailed(bitmap: Bitmap, window: Rect, screen: Rect): PageNumberResult = withContext(Dispatchers.IO) {
+        val crop = PageHeaderCrop.crop(bitmap, window, screen) ?: return@withContext PageNumberResult(null, null)
         try {
             val text = Tasks.await(recognizer.process(InputImage.fromBitmap(crop, 0)))
             val first = text.textBlocks.flatMap { it.lines }.filter { it.boundingBox != null }
                 .minWithOrNull(compareBy({ it.boundingBox!!.left }, { it.boundingBox!!.top }))
-            first?.let { PageNumberParser.parse(it.text) }
+            val number = first?.let { PageNumberParser.parse(it.text) }
+            val symbols = first?.elements?.flatMap { it.symbols } ?: emptyList()
+            val leading = symbols.takeWhile { it.text.length == 1 && (it.text[0] in '0'..'9' || it.text[0] in '０'..'９') }
+            val label = leading.joinToString("") { it.text }
+            val boxes = if (number != null && PageNumberParser.parse(label) == number &&
+                label.length == number.toString().length && leading.all { it.boundingBox != null }) {
+                leading.map { Rect(it.boundingBox!!) }
+            } else null
+            PageNumberResult(number, boxes)
         } finally {
             if (crop !== bitmap) crop.recycle()
         }

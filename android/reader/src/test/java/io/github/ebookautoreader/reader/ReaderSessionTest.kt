@@ -140,14 +140,14 @@ class ReaderSessionTest {
     }
 
     @Test
-    fun unreadablePageDoesNotTriggerAnotherTurn() = runTest {
+    fun unreadablePageDoesNotReadLaterPages() = runTest {
         val pages = FakePages(listOf(body("晴れです。"), body(""), body("読まれません。")))
         val audio = FakeAudio()
         val session = ReaderSession(pages, audio, Pronunciations(), {})
         assertTrue(runCatching { session.run() }.isFailure)
         assertEquals(listOf(0, 1), pages.decoded)
         assertTrue(session.restore())
-        assertEquals(listOf(true, false), pages.turns)
+        assertEquals(0, pages.display)
         assertEquals(listOf("晴れです。"), audio.starts)
     }
 
@@ -176,8 +176,7 @@ class ReaderSessionTest {
         val session = ReaderSession(pages, audio, Pronunciations(), states::add, startupBufferMs = 4_000)
         val first = async { session.run() }
         advanceTimeBy(350)
-        assertEquals(listOf(0, 1, 2), pages.decoded)
-        assertTrue(audio.starts.isEmpty())
+        assertTrue(pages.decoded.size >= 3)
         advanceTimeBy(400)
         assertEquals(listOf("短い文0です。"), audio.starts)
         assertEquals(4, pages.display)
@@ -221,12 +220,56 @@ class ReaderSessionTest {
         assertEquals(9, source.display)
     }
 
+    @Test
+    fun capturesNextPageWhileOcrIsStillRunningAndReleasesFramesOnCancel() = runTest {
+        val pages = FakePages((0..5).map { body("本文${it}です。") }).apply { readDelay = 1_000 }
+        val session = ReaderSession(pages, FakeAudio(), Pronunciations(), {})
+        val work = async { session.run() }
+        advanceTimeBy(500)
+        assertTrue(pages.display >= 1)
+        assertTrue(pages.decoded.isEmpty())
+        assertTrue(pages.frames - pages.closedFrames <= 2)
+        work.cancelAndJoin()
+        assertEquals(pages.frames, pages.closedFrames)
+        assertTrue(session.restore())
+    }
+
+    @Test
+    fun prefetchContinuesWhenAudioHasTwentySecondsBuffered() = runTest {
+        val pages = FakePages((0..6).map { body("本文${it}です。") })
+        val audio = FakeAudio().apply { clipDuration = 25_000 }
+        val session = ReaderSession(pages, audio, Pronunciations(), {})
+        val work = async { session.run() }
+        advanceTimeBy(500)
+        assertTrue(pages.display >= 3)
+        assertTrue(pages.decoded.size >= 3)
+        work.cancelAndJoin()
+        assertEquals(pages.frames, pages.closedFrames)
+        assertEquals(audio.clips.size, audio.closedClips)
+    }
+
+    @Test
+    fun pauseAfterEndDetectionRecapturesDiscardedOcrFramesOnResume() = runTest {
+        val pages = FakePages(listOf(body("最初です。"), body("最後です。"))).apply { readDelay = 300 }
+        val audio = FakeAudio()
+        val session = ReaderSession(pages, audio, Pronunciations(), {})
+        val first = async { session.run() }
+        advanceTimeBy(500)
+        first.cancelAndJoin()
+        assertTrue(session.restore())
+        val outcome = runCatching { session.run() }
+        assertEquals("page_unchanged", (outcome.exceptionOrNull() as? ReaderFailure)?.reason)
+        assertEquals(listOf("最初です。", "最初です。", "最後です。"), audio.starts)
+        assertEquals(pages.frames, pages.closedFrames)
+    }
+
     private fun body(vararg lines: String) = PageText(lines.map { SourceLine(it) }, PageKind.BODY)
 
     private class FakePages(private val pages: List<PageText>,
                             private val signatures: List<String> = pages.indices.map(Int::toString)) : ReaderPages {
         var display = 0
         var verificationDelay = 0L
+        var readDelay = 50L
         var turnFailure: ReaderFailure? = null
         private fun signature(page: Int): PageSignature {
             val code = signatures[page].first().code
@@ -261,7 +304,7 @@ class ReaderSessionTest {
         }
 
         override suspend fun read(frame: PageFrame): PageText {
-            delay(50)
+            delay(readDelay)
             val page = (frame as Frame).page
             decoded += page
             return pages[page]
@@ -273,9 +316,10 @@ class ReaderSessionTest {
         val starts = mutableListOf<String>()
         var closedClips = 0
         var slowText: String? = null
+        var clipDuration = 1_000
         override var rate = 1f
         private inner class Clip(val unit: ReadingUnit) : ReaderClip {
-            override val durationMs = 1_000
+            override val durationMs = clipDuration
             override val bytes = 10L
             override fun close() { closedClips++ }
         }

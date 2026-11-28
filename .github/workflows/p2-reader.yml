@@ -2,12 +2,14 @@ name: P2 Reader
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, p2/reader-engine]
     paths:
       - "android/**"
       - "p2/**"
       - "p1/fixtures.py"
       - ".github/workflows/p2-reader.yml"
+  push:
+    branches: [p25/controls, p25/pipeline, p2/reader-engine]
   workflow_dispatch:
 
 permissions:
@@ -38,7 +40,7 @@ jobs:
           python p1/fixtures.py --dense
           python p1/reading.py prepare
           bash -n p2/install-debug.sh
-          gradle -p android :reader:testDebugUnitTest :ndl:testDebugUnitTest :app:testDebugUnitTest :reader:lintDebug :reader:assembleDebug
+          gradle --info -p android :reader:testDebugUnitTest :ndl:testDebugUnitTest :app:testDebugUnitTest :reader:lintDebug :reader:assembleDebug
           unzip -Z1 android/reader/build/outputs/apk/debug/reader-debug.apk > apk-files.txt
           grep -Fx 'assets/pages/join-a.png' apk-files.txt
           grep -Fx 'assets/pages/body-dense.png' apk-files.txt

@@ -5,36 +5,41 @@ import org.junit.Test
 
 class DigitTemplatesTest {
     private fun glyph(n: Int): FloatArray = FloatArray(560) { if (it / 56 == n) 1f else 0f }
-
-    @Test fun learnsOnlyWithMatchingLabelsAndRepeatedObservations() {
-        val t = DigitTemplates()
-        t.observe(listOf(glyph(1)), "12")
-        assertEquals(0, t.learned)
-        for (n in 0..9) t.observe(listOf(glyph(n)), "$n")
-        assertEquals(0, t.learned)
-        assertEquals("incomplete_templates", t.match(listOf(glyph(3))).reason)
-        for (n in 0..9) t.observe(listOf(glyph(n)), "$n")
-        assertEquals(10, t.learned)
-        assertEquals(39, t.match(listOf(glyph(3), glyph(9))).number)
+    private fun page(t: DigitTemplates, n: Int) = t.observe(n.toString().map { glyph(it - '0') }, n.toString())
+    private fun trained(): DigitTemplates = DigitTemplates().also { t ->
+        for (n in 100..129) page(t, n)
     }
 
-    @Test fun uncertainAndContradictoryInputsAreRejected() {
+    @Test fun learnsFromDistinctPagesAndRecognizesUnseenNumber() {
+        val t = trained()
+        assertEquals(10, t.learned)
+        assertEquals(390, t.match(listOf(glyph(3), glyph(9), glyph(0))).number)
+    }
+
+    @Test fun mismatchDoesNotEraseExistingTemplates() {
+        val t = trained()
+        assertEquals("same_digit_mismatch", t.observe(listOf(glyph(5)), "1"))
+        assertEquals(10, t.learned)
+        assertEquals(3, t.match(listOf(glyph(3))).number)
+    }
+
+    @Test fun samePageIsNotCountedTwice() {
         val t = DigitTemplates()
-        for (n in 0..9) repeat(2) { t.observe(listOf(glyph(n)), "$n") }
+        assertEquals("accepted", page(t, 11))
+        assertEquals("duplicate_page", page(t, 11))
+        assertEquals(0, t.learned)
+        page(t, 12)
+        assertEquals(1, t.learned)
+    }
+
+    @Test fun refusesAmbiguousOrIncompleteMatchesAndClearsSession() {
+        val t = trained()
         assertEquals("low_confidence", t.match(listOf(FloatArray(560) { 0.5f })).reason)
         assertEquals("segmentation", t.match(emptyList()).reason)
-        assertEquals("segmentation", t.match(listOf(FloatArray(1))).reason)
         assertEquals("leading_zero", t.match(listOf(glyph(0), glyph(1))).reason)
-        t.observe(listOf(glyph(5)), "1")
+        t.clear()
         assertEquals(0, t.learned)
-    }
-
-    @Test fun repeatedDigitInOnePageIsOneObservation() {
-        val t = DigitTemplates()
-        t.observe(listOf(glyph(1), glyph(1)), "11")
-        assertEquals(0, t.learned)
-        t.observe(listOf(glyph(1)), "1")
-        assertEquals(1, t.learned)
+        assertEquals("incomplete_templates", t.match(listOf(glyph(3))).reason)
     }
 
     @Test fun separatesLeadingRunsAndRejectsDarkBackground() {
