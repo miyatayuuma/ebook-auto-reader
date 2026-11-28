@@ -19,10 +19,10 @@ import android.view.accessibility.AccessibilityNodeInfo
 class ProbeService : AccessibilityService() {
     private val h = Handler(Looper.getMainLooper())
     private val gap = GapProbe()
-    private val audio by lazy { getSystemService(AudioManager::class.java) }
-    private val accessibility by lazy { getSystemService(AccessibilityManager::class.java) }
-    private val power by lazy { getSystemService(PowerManager::class.java) }
-    private val keyguard by lazy { getSystemService(KeyguardManager::class.java) }
+    private val audio by lazy { requireNotNull(getSystemService(AudioManager::class.java)) }
+    private val accessibility by lazy { requireNotNull(getSystemService(AccessibilityManager::class.java)) }
+    private val power by lazy { requireNotNull(getSystemService(PowerManager::class.java)) }
+    private val keyguard by lazy { requireNotNull(getSystemService(KeyguardManager::class.java)) }
     private var scope = ProbeSession.Mode.OFF
     private var generation = -1
     private var audioSummary = ""
@@ -70,7 +70,9 @@ class ProbeService : AccessibilityService() {
     private fun observeAudio(configs: List<AudioPlaybackConfiguration>, source: String) {
         if (!refreshScope()) return
         // Public anonymized attributes only; no player UID or hidden API.
-        val active = configs.filter { it.isActive }
+        // Unprivileged callback/snapshot exposes the active anonymized list.
+        // isActive() is not part of the public SDK.
+        val active = configs
         val counts = active.groupingBy { "${it.audioAttributes.usage}:${it.audioAttributes.contentType}" }
             .eachCount().toSortedMap()
         val candidate = wasTalkBack && active.any {
