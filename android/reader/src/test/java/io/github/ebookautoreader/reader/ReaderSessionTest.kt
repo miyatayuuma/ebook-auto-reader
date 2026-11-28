@@ -340,7 +340,7 @@ class ReaderSessionTest {
     }
 
     @Test
-    fun eyesReturnsBeforeOcrCompletesAndDoesNotStartAudioOnPrefetchedPage() = runTest {
+    fun eyesStaysOnPageDuringOcrAndPlayback() = runTest {
         val pages = FakePages((0..5).map { body("本文${it}です。") }).apply { readDelay = 1_000 }
         val audio = FakeAudio()
         val shownAtStart = mutableListOf<Int>()
@@ -351,10 +351,11 @@ class ReaderSessionTest {
         advanceTimeBy(500)
         assertTrue(pages.decoded.isEmpty())
         assertEquals(0, pages.display)
-        assertEquals(listOf(true, true, false, false), pages.turns)
+        assertTrue(pages.turns.isEmpty())
         advanceTimeBy(750)
         assertEquals(listOf("本文0です。"), audio.starts)
         assertEquals(listOf(0), shownAtStart)
+        assertTrue(pages.turns.isEmpty())
         work.cancelAndJoin()
         assertTrue(session.restore())
         assertEquals(pages.frames, pages.closedFrames)
@@ -380,7 +381,7 @@ class ReaderSessionTest {
     }
 
     @Test
-    fun eyesKeepsCrossPageSentenceIntactAndStartsNextClipOnItsPage() = runTest {
+    fun eyesReadsColdPageTailBeforeMovingForwardWithoutLosingCharacters() = runTest {
         val pages = FakePages(listOf(body("川岸の石は"), body("光った。鳥です。"), body("夜です。")))
         val audio = FakeAudio()
         val displayed = mutableListOf<Int>()
@@ -388,8 +389,36 @@ class ReaderSessionTest {
         val session = ReaderSession(pages, audio, Pronunciations(), {},
             clock = { testScheduler.currentTime }, readingMode = ReadingMode.EYES)
         assertTrue(runCatching { session.run() }.isFailure)
-        assertEquals(listOf("川岸の石は光った。", "鳥です。", "夜です。"), audio.starts)
-        assertEquals(listOf(0, 1, 2), displayed)
+        assertEquals(listOf("川岸の石は", "光った。", "鳥です。", "夜です。"), audio.starts)
+        assertEquals("川岸の石は光った。鳥です。夜です。", audio.starts.joinToString(""))
+        assertEquals(listOf(0, 1, 1, 2), displayed)
+        assertTrue(pages.turns.all { it })
+    }
+
+    @Test
+    fun eyesPauseDuringNextPageSynthesisKeepsVerifiedPageAndResumes() = runTest {
+        val pages = FakePages(listOf(body("最初です。"), body("続きです。"), body("最後です。")))
+        val audio = FakeAudio().apply { slowText = "続きです。" }
+        val session = ReaderSession(pages, audio, Pronunciations(), {},
+            clock = { testScheduler.currentTime }, readingMode = ReadingMode.EYES)
+        val first = async { session.run() }
+        advanceTimeBy(1_500)
+        assertEquals(1, pages.display)
+        assertEquals(listOf(0, 1), pages.decoded)
+        assertEquals(listOf("最初です。"), audio.starts)
+        first.cancelAndJoin()
+        assertTrue(session.restore())
+        assertEquals(1, pages.display)
+        assertEquals(listOf(true), pages.turns)
+        audio.slowText = null
+        val resumed = async { session.run() }
+        advanceTimeBy(200)
+        assertEquals(listOf("最初です。", "続きです。"), audio.starts)
+        assertEquals(1, pages.display)
+        resumed.cancelAndJoin()
+        assertTrue(session.restore())
+        assertEquals(pages.frames, pages.closedFrames)
+        assertEquals(audio.clips.size, audio.closedClips)
     }
 
     @Test

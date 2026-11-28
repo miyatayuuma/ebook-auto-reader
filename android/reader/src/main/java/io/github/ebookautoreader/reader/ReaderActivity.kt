@@ -35,7 +35,7 @@ import kotlin.math.roundToInt
 class ReaderActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val preferences by lazy { ReaderPreferences(this) }
-    private val speech by lazy { DeviceSpeech(this) }
+    private val speech by lazy { DeviceSpeech(this, measureSynthesis = BuildConfig.DEBUG) }
     private lateinit var serviceInfo: TextView
     private lateinit var voiceInfo: TextView
     private lateinit var voices: Spinner
@@ -46,6 +46,7 @@ class ReaderActivity : Activity() {
     private lateinit var readingModes: RadioGroup
     private val modeIds = mutableMapOf<ReadingMode, Int>()
     private lateinit var modeDescription: TextView
+    private lateinit var brightnessInfo: TextView
     private var names = emptyList<String>()
     private var voiceLoaded = false
     private var task: Job? = null
@@ -95,6 +96,17 @@ class ReaderActivity : Activity() {
             if (mode != preferences.readingMode()) preferences.saveReadingMode(mode)
             modeDescription.text = readingModeDescription(mode)
         }
+        content.addView(Switch(this).apply {
+            text = "耳で聞くモードでは画面を自動で暗くする"
+            isChecked = DisplayPower.enabled(this@ReaderActivity)
+            setOnCheckedChangeListener { _, value -> DisplayPower.setEnabled(this@ReaderActivity, value) }
+            minHeight = dp(48)
+        })
+        brightnessInfo = text("", 14).also(content::addView)
+        button(content, "画面輝度の変更を許可") {
+            startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                android.net.Uri.parse("package:$packageName")))
+        }
         content.addView(text("音声設定", 21))
         voices = Spinner(this).also(content::addView)
         voiceInfo = text("日本語オフライン音声を確認中…", 14).also(content::addView)
@@ -133,6 +145,8 @@ class ReaderActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        brightnessInfo.text = if (Settings.System.canWrite(this)) "輝度変更を許可済み" else
+            "未許可の場合は通常の明るさで読み上げます。"
         refreshCache()
         showReadingMode(preferences.readingMode())
         val saved = preferences.speech()

@@ -1,5 +1,7 @@
 # P2.5 統合版：Pixel 9実機受入
 
+P2.6第1陣の統合候補では、[追加受入手順](../docs/p26-integration.md) を優先してください。以下の固定APKはP2.5の履歴です。
+
 対象はPixel 9／Android 17のGoogle Play版DMMブックスと日本語縦書きリフロー本文です。画像は処理後に解放し、合成音声は一時領域から再生後や停止時に削除します。開発用デバッグ版では認識済みページ（原文・ルビ・位置・分類等）を端末のバックアップ対象外の私有領域に保持し、同一画像・モデル・認識条件の再読時に再利用します。保存件数・容量の表示と全削除を設定画面から実行できます。自動期限・恒久保存方針は未決定で、書籍別ページ番号索引も未実装です。Androidの画面取得が保護画面または黒画面を返すと停止します。[Androidの画面取得API](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService#takeScreenshotOfWindow(int,java.util.concurrent.Executor,android.accessibilityservice.AccessibilityService.TakeScreenshotCallback))
 
 ## APK更新
