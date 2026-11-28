@@ -20,7 +20,7 @@ import kotlin.coroutines.resumeWithException
 
 internal data class ReaderWindow(val id: Int, val owner: String, val bounds: Rect)
 
-internal class ScreenFrame(val bitmap: Bitmap, override val signature: PageSignature, val uniformLight: Boolean, override var pageNumber: Int? = null) :
+internal class ScreenFrame(val bitmap: Bitmap, override val signature: PageSignature, val uniformLight: Boolean, val headerSignature: PageSignature, override var pageNumber: Int? = null) :
     PageFrame {
     override fun close() = bitmap.recycle()
 }
@@ -32,27 +32,57 @@ internal class WindowPages(
     private val withoutOverlays: suspend (Boolean, suspend () -> PageFrame) -> PageFrame,
     private val menuControlsVisible: () -> Boolean,
     private val screenshotSlot: suspend () -> Unit,
+    private val blocked: () -> Boolean,
+    private val holdEpoch: () -> Long,
     private val turn: TurnSettings,
     private val pageNumber: suspend (ScreenFrame, ReaderWindow) -> Int?,
     private val readPage: suspend (ScreenFrame) -> PageText,
 ) : ReaderPages {
     private val captureExecutor = Dispatchers.Default.asExecutor()
+    private var verifiedSignature: PageSignature? = null
+    private var verifiedHeader: PageSignature? = null
+    private var verifiedNumber: Int? = null
+
+    private suspend fun recognize(frame: ScreenFrame, target: ReaderWindow) {
+        frame.pageNumber = try { pageNumber(frame, target) } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (_: Exception) { null }
+        ReaderDiagnostics.event("page_number navigation number=${frame.pageNumber ?: "unknown"}")
+    }
+
+    private fun remember(frame: ScreenFrame) {
+        verifiedSignature = frame.signature
+        verifiedHeader = frame.headerSignature
+        verifiedNumber = frame.pageNumber
+    }
+
 
     // A single screenshot for the debug page-number measurement.
     suspend fun captureForPageNumber(): ScreenFrame {
         val target = resolve() ?: throw ReaderFailure("DMMの本文ページを表示してください。", "window_changed")
-        return captureOnce(target, recognizeNumber = false)
+        return captureOnce(target)
     }
 
     override suspend fun capture(): PageFrame {
         val target = resolve() ?: throw ReaderFailure("DMMの本文ページを表示してください。")
         val first = captureOnce(target)
-        val signature = first.use { it.signature }
+        val signature = first.signature
+        val header = first.headerSignature
+        first.close()
         delay(420)
         val second = captureOnce(target)
-        if (second.signature.matches(signature)) return second
-        second.close()
-        throw ReaderFailure("画面が動いています。本文を表示してから再開してください。", "page_in_transition")
+        try {
+            if (!second.signature.matches(signature) || !second.headerSignature.matches(header)) {
+                throw ReaderFailure("画面が動いています。本文を表示してから再開してください。", "page_in_transition")
+            }
+            recognize(second, target)
+            checkWindow(target)
+            remember(second)
+            return second
+        } catch (error: Throwable) {
+            second.close()
+            throw error
+        }
     }
 
     override suspend fun prepareTurn(forward: Boolean, previous: PageSignature): suspend () -> PageFrame {
@@ -62,19 +92,22 @@ internal class WindowPages(
         }
         var previousNumber: Int? = null
         captureOnce(target).use {
-            previousNumber = it.pageNumber
-            if (!it.signature.matches(previous)) {
+            if (!it.signature.matches(previous) || verifiedSignature?.matches(it.signature) != true ||
+                verifiedHeader?.matches(it.headerSignature) != true) {
                 throw ReaderFailure("表示が変わったためページ送りを停止しました。", "page_position_changed")
             }
+            previousNumber = verifiedNumber
         }
         val right = if (forward) turn.rightward else !turn.rightward
+        val preparedEpoch = holdEpoch()
         return {
             ReaderDiagnostics.measure("page turn method=${turn.method} forward=$forward") {
                 withoutOverlays(turn.delayed) {
                     checkWindow(target)
-                    // Recheck after the overlay gap when a diagnostic delay is enabled.
-                    if (turn.delayed) captureOnce(target).use {
-                        if (!it.signature.matches(previous)) {
+                    // A shade/menu may have covered the reader after preparation.
+                    // Revalidate the known page before dispatching any gesture.
+                    if (turn.delayed || holdEpoch() != preparedEpoch) captureOnce(target).use {
+                        if (!it.signature.matches(previous) || verifiedHeader?.matches(it.headerSignature) != true) {
                             throw ReaderFailure("操作待機中に表示が変わりました。", "page_position_changed")
                         }
                     }
@@ -82,7 +115,9 @@ internal class WindowPages(
                     val before = fixturePosition(target)
                     checkWindow(target)
                     if (turn.method == TurnMethod.NODE) pageAction(target, right) else gesture(target, right)
-                    val frame = ReaderDiagnostics.measure("page settle") { awaitPage(target, previous, previousNumber, forward) }
+                    val frame = ReaderDiagnostics.measure("page settle") {
+                        withActiveTimeout(8_000, blocked) { awaitPage(target, previous, previousNumber, forward) }
+                    }
                     val after = fixturePosition(target)
                     if (before != null && after != null) {
                         val amount = after - before
@@ -107,35 +142,62 @@ internal class WindowPages(
 
     private suspend fun awaitPage(target: ReaderWindow, previous: PageSignature, previousNumber: Int?, forward: Boolean): PageFrame {
         val transition = PageTransition(previous)
-        var numberedCandidate: PageSignature? = null
-        repeat(6) {
-            delay(if (it == 0) 250 else 300)
+        var candidate: PageSignature? = null
+        var candidateHeader: PageSignature? = null
+        var sampledNumber: Int? = null
+        var sampled = false
+        var candidateCount = 0
+        repeat(6) { index ->
+            delay(if (index == 0) 250 else 300)
             val frame = captureOnce(target)
-            val difference = previous.difference(frame.signature)
-            ReaderDiagnostics.event("page sample index=${it + 1} relation=${difference.comparison}" +
-                " changedCells=${difference.changedCells} cells=${difference.cells}" +
-                " meanLumaDelta=${difference.meanLumaDelta}")
-            val number = frame.pageNumber
-            if (previousNumber != null && number != null && number != previousNumber) {
-                val expected = previousNumber + if (forward) 1 else -1
-                if (number != expected) {
-                    frame.close()
-                    throw ReaderFailure("ページ番号が期待した移動と一致しません。", "page_number_mismatch")
+            try {
+                val difference = previous.difference(frame.signature)
+                ReaderDiagnostics.event("page sample index=${index + 1} relation=${difference.comparison}" +
+                    " changedCells=${difference.changedCells} cells=${difference.cells} meanLumaDelta=${difference.meanLumaDelta}")
+                val sameCandidate = candidate?.matches(frame.signature) == true &&
+                    candidateHeader?.matches(frame.headerSignature) == true
+                candidateCount = if (sameCandidate) candidateCount + 1 else 1
+                if (!sameCandidate) {
+                    candidate = frame.signature
+                    candidateHeader = frame.headerSignature
+                    sampled = false
+                    sampledNumber = null
                 }
-                if (difference.comparison == PageComparison.DIFFERENT) {
-                    val prior = numberedCandidate
-                    if (prior != null && prior.matches(frame.signature)) {
+                if (sameCandidate && !sampled) {
+                    recognize(frame, target)
+                    sampledNumber = frame.pageNumber
+                    sampled = true
+                }
+                val number = sampledNumber
+                if (sampled && previousNumber != null && number != null && number != previousNumber) {
+                    val expected = previousNumber + if (forward) 1 else -1
+                    if (number != expected) throw ReaderFailure("ページ番号が期待した移動と一致しません。", "page_number_mismatch")
+                    if (difference.comparison == PageComparison.DIFFERENT) {
+                        checkWindow(target)
+                        frame.pageNumber = number
+                        remember(frame)
                         ReaderDiagnostics.event("page turn result=number_and_signature from=$previousNumber to=$number")
                         return frame
                     }
-                    numberedCandidate = frame.signature
-                } else numberedCandidate = null
-            } else numberedCandidate = null
-            val outcome = transition.observe(frame.signature, difference.comparison)
-            if (outcome != PageComparison.UNCERTAIN) {
-                ReaderDiagnostics.event("page turn result=" +
-                    if (outcome == PageComparison.SAME) "page_unchanged" else "stable_page_changed")
-                return frame
+                }
+                val outcome = transition.observe(frame.signature, difference.comparison)
+                if (outcome != PageComparison.UNCERTAIN &&
+                    candidateCount >= if (outcome == PageComparison.SAME) 4 else 3) {
+                    if (!sampled) recognize(frame, target) else frame.pageNumber = sampledNumber
+                    val confirmedNumber = frame.pageNumber
+                    if (previousNumber != null && confirmedNumber != null && confirmedNumber != previousNumber &&
+                        confirmedNumber != previousNumber + if (forward) 1 else -1) {
+                        throw ReaderFailure("ページ番号が期待した移動と一致しません。", "page_number_mismatch")
+                    }
+                    checkWindow(target)
+                    remember(frame)
+                    ReaderDiagnostics.event("page turn result=" +
+                        if (outcome == PageComparison.SAME) "page_unchanged" else "stable_page_changed")
+                    return frame
+                }
+            } catch (error: Throwable) {
+                frame.close()
+                throw error
             }
             frame.close()
         }
@@ -144,11 +206,12 @@ internal class WindowPages(
 
     override suspend fun read(frame: PageFrame): PageText = readPage(frame as ScreenFrame)
 
-    private suspend fun captureOnce(target: ReaderWindow, recognizeNumber: Boolean = true): ScreenFrame =
+    private suspend fun captureOnce(target: ReaderWindow): ScreenFrame =
         ReaderDiagnostics.measure("capture") {
             screenshotSlot()
             checkWindow(target)
             if (menuControlsVisible()) throw menuFailure()
+            val startedEpoch = holdEpoch()
             var bitmap: Bitmap? = null
             var retained = false
             try {
@@ -159,12 +222,8 @@ internal class WindowPages(
                 val frame = withContext(Dispatchers.Default) { fingerprint(captured) }
                 checkWindow(target)
                 if (menuControlsVisible()) throw menuFailure()
-                frame.pageNumber = if (!recognizeNumber) null else try { pageNumber(frame, target) } catch (error: kotlinx.coroutines.CancellationException) {
-                    throw error
-                } catch (_: Exception) { null }
-                ReaderDiagnostics.event("page_number navigation number=${frame.pageNumber ?: "unknown"}")
-                checkWindow(target)
-                if (menuControlsVisible()) throw menuFailure()
+                if (holdEpoch() != startedEpoch) throw ReaderFailure(
+                    "画面表示が中断されたため位置を確認してください。", "page_position_unknown")
                 retained = true
                 frame
             } finally {
@@ -337,6 +396,6 @@ internal class WindowPages(
             throw menuFailure()
         }
         val light = (first shr 16 and 255) >= 210 && (first shr 8 and 255) >= 210 && (first and 255) >= 200
-        return ScreenFrame(bitmap, PageVisual.signature(luma), uniform && light)
+        return ScreenFrame(bitmap, PageVisual.signature(luma), uniform && light, PageVisual.headerSignature(luma))
     }
 }

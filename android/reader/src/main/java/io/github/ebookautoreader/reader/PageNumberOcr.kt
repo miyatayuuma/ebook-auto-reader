@@ -2,13 +2,15 @@ package io.github.ebookautoreader.reader
 
 import android.graphics.Bitmap
 import android.graphics.Rect
-import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlin.math.ceil
 import kotlin.math.floor
 
@@ -58,14 +60,27 @@ internal class PageNumberOcr(model: PageNumberModel) : AutoCloseable {
         if (x1 < 0 || y1 < 0 || x2 > bitmap.width || y2 > bitmap.height || x1 >= x2 || y1 >= y2) {
             return@withContext null
         }
-        val crop = Bitmap.createBitmap(bitmap, x1, y1, x2 - x1, y2 - y1)
-        try {
-            val text = Tasks.await(recognizer.process(InputImage.fromBitmap(crop, 0)))
-            val first = text.textBlocks.flatMap { it.lines }.filter { it.boundingBox != null }
-                .minWithOrNull(compareBy({ it.boundingBox!!.left }, { it.boundingBox!!.top }))
-            first?.let { PageNumberParser.parse(it.text) }
-        } finally {
-            if (crop !== bitmap) crop.recycle()
+        val cropped = Bitmap.createBitmap(bitmap, x1, y1, x2 - x1, y2 - y1)
+        val crop = if (cropped === bitmap) bitmap.copy(Bitmap.Config.ARGB_8888, false) else cropped
+        suspendCancellableCoroutine { continuation ->
+            try {
+                recognizer.process(InputImage.fromBitmap(crop, 0)).addOnCompleteListener { task ->
+                    try {
+                        if (continuation.isActive) {
+                            if (task.isSuccessful) {
+                                val first = task.result.textBlocks.flatMap { it.lines }.filter { it.boundingBox != null }
+                                    .minWithOrNull(compareBy({ it.boundingBox!!.left }, { it.boundingBox!!.top }))
+                                continuation.resume(first?.let { PageNumberParser.parse(it.text) })
+                            } else {
+                                continuation.resumeWithException(task.exception ?: IllegalStateException("page number recognition failed"))
+                            }
+                        }
+                    } finally { crop.recycle() }
+                }
+            } catch (error: Exception) {
+                crop.recycle()
+                if (continuation.isActive) continuation.resumeWithException(error)
+            }
         }
     }
 

@@ -387,6 +387,9 @@ internal class ReaderSession(
                     (expected.pageNumber == null || frame.pageNumber == null || expected.pageNumber == frame.pageNumber)
                     else forward && recent.all { frame.signature.compare(it) == PageComparison.DIFFERENT }
                 if (frame.signature.matches(from.signature)) {
+                    if (from.pageNumber != null && frame.pageNumber != null && from.pageNumber != frame.pageNumber) {
+                        throw ReaderFailure("画面とページ番号が一致しません。", "page_position_unknown")
+                    }
                     // The source confirmed stable captures with the original page.
                     trusted = true
                     update(state.copy(displayed = from.index))
