@@ -1,6 +1,8 @@
 package io.github.ebookautoreader.reader
 
 import android.app.Activity
+import android.Manifest
+import android.content.pm.PackageManager
 import android.content.ComponentName
 import android.content.Intent
 import android.graphics.Color
@@ -44,6 +46,8 @@ class ReaderActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 25)
         val selection = preferences.speech()
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val scroll = ScrollView(this).apply {
@@ -60,6 +64,7 @@ class ReaderActivity : Activity() {
         serviceInfo = text("", 15).also(content::addView)
         button(content, "アクセシビリティ設定") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         button(content, "DMMブックスを開く") { openDmm() }
+        content.addView(text("クイック設定を開き、編集からEbook Auto Readerを追加してください。通知を許可すると通知欄からも操作できます。", 15))
         content.addView(text("音声設定", 21))
         voices = Spinner(this).also(content::addView)
         voiceInfo = text("日本語オフライン音声を確認中…", 14).also(content::addView)
@@ -97,7 +102,7 @@ class ReaderActivity : Activity() {
         val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
             .orEmpty().split(':').any { ComponentName.unflattenFromString(it) == own }
         serviceInfo.text = if (enabled) {
-            "DMMブックスで縦書き本文を開き、画面端の ▶ から「読み上げ開始」を押してください。"
+            "DMMブックスで縦書き本文を開き、クイック設定から読み上げを開始してください。"
         } else {
             "アクセシビリティ設定でEbook Auto Readerを有効にしてください。"
         }

@@ -1,4 +1,4 @@
-# P2.4 Pixel 9での確認
+# P2.5A-UI Pixel 9での確認
 
 対象はPixel 9／Android 17のGoogle Play版DMMブックスと日本語縦書きリフロー本文です。画像と文字認識結果はセッション中のメモリに置き、合成音声はアプリの一時領域から再生後や停止時に削除します。Androidの画面取得が保護画面または黒画面を返すと停止します。[Androidの画面取得API](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService#takeScreenshotOfWindow(int,java.util.concurrent.Executor,android.accessibilityservice.AccessibilityService.TakeScreenshotCallback))
 
@@ -8,21 +8,22 @@
 
 ```bash
 cd ~/ebook-auto-reader
-git switch p2/reader-engine
+git fetch origin p25/controls
+git switch --detach origin/p25/controls
 git pull --ff-only
 adb devices -l
 bash p2/install-debug.sh --run RUN_ID
 ```
 
-APKを取得済みの場合は、最後の行を `bash p2/install-debug.sh --apk ~/Downloads/EbookAutoReader-P2.4.apk` に置き換えます。既存のインストールと同じ管理PC・署名鍵で実行します。前回 `P2_SIGNING_DIR` を指定した場合は同じ値を使います。既定の鍵は `~/.local/share/ebook-auto-reader/` にあります。複数台接続時は、環境変数 `ANDROID_SERIAL` でPixel 9を選びます。
+APKを取得済みの場合は、最後の行を `bash p2/install-debug.sh --apk ~/Downloads/reader-debug.apk` に置き換えます。既存のインストールと同じ管理PC・署名鍵で実行します。前回 `P2_SIGNING_DIR` を指定した場合は同じ値を使います。既定の鍵は `~/.local/share/ebook-auto-reader/` にあります。複数台接続時は、環境変数 `ANDROID_SERIAL` でPixel 9を選びます。
 
 インストーラーは `adb install -r` で更新し、サイズとSHA-256が一致する導入済みモデルを再利用します。画面と操作の確認から始める場合は `--probe-only` を付けられます。初めてモデルを導入する場合は [P1のモデル取得手順](../p1/README.md) を使います。
 
 ## 1. DMMでの通常操作
 
-アクセシビリティを有効にし、DMMの縦書き本文でメニューを閉じ、画面端の **▶** から **読み上げ開始** を押します。診断を事前に実行する必要はありません。次ページ方向はトップ画面の設定で切り替えます。
+アクセシビリティと通知を許可し、クイック設定を開いて編集から **Ebook Auto Reader** を追加します。DMMの縦書き本文でメニューを閉じ、タイルの **読み上げ開始** を押します。再生中はタイルで一時停止、一時停止中は再開します。通知欄では状態と相対位置を確認でき、一時停止・再開・終了を操作できます。次ページ方向はトップ画面の設定で切り替えます。
 
-通常のページ送りは左右端タップ固定です。対象ウィンドウの左から約9.26%／90.74%、上から95%を70msタップします。1080×2424の全画面ならおよそ (100, 2303)／(980, 2303) です。パネルとタッチガードを外して2フレーム待ち、ページの安定確認後に復元します。下端にシステムUIやDMMの操作領域がある場合もあるため実機で確認してください。
+通常のページ送りは左右端タップ固定です。対象ウィンドウの左から約9.26%／90.74%、上から95%を70msタップします。1080×2424の全画面ならおよそ (100, 2303)／(980, 2303) です。パネルや透明タッチガードは使用しません。通知欄の表示中はページ操作を保留します。下端にシステムUIやDMMの操作領域がある場合もあるため実機で確認してください。
 
 ## Lubuntuからの診断（デバッグAPKのみ）
 
@@ -31,9 +32,9 @@ DMM本文または自作ページを前面に置き、読み上げを終了し�
 ```bash
 # 画面取得
 adb shell am broadcast -a io.github.ebookautoreader.DEBUG_READER -p io.github.ebookautoreader.debug --es command capture
-# 通常と同じパネル取り外しで往復
+# 通常動作と同じ方法で往復
 adb shell am broadcast -a io.github.ebookautoreader.DEBUG_READER -p io.github.ebookautoreader.debug --es command turn
-# パネルなしとの比較
+# 3秒後に往復（パネルなし）
 adb shell am broadcast -a io.github.ebookautoreader.DEBUG_READER -p io.github.ebookautoreader.debug --es command turn-headless
 # 代替方式の診断（通常設定は変更しない）
 adb shell am broadcast -a io.github.ebookautoreader.DEBUG_READER -p io.github.ebookautoreader.debug --es command turn --es method SWIPE
@@ -56,7 +57,11 @@ adb shell am start -n io.github.ebookautoreader.debug/io.github.ebookautoreader.
 2. `body-bottom` では「空音は実をそっと地面へ戻した。」まで聞こえ、ノンブル27が入らないことを確認します。音声冒頭検証はADBの `test voice` で行います。
 3. DMMで5〜10ページ聴き、飛ばし・重複、ページまたぎ、初回準備後の待ち時間を確認します。画面の **読み上げ中** と **表示** は開始位置からの相対ページ番号です。表示が先行した時点で **一時停止** と **終了** を試し、再生中の文のページか最後に完了した文末のページへ戻ることを確認します。**再開** は中断した文の文頭からです。
 4. 一時停止中に手動でページを変える試験と、文字サイズ・余白を変える試験を行います。古い先読みを読み始めず安全に停止することを確認します。標準条件と文字が小さく余白が異なる条件で、新規に3ページずつ読み直します。
-5. トップ画面で速度と高さを変更し、読み上げ中にもパネルの **−**／**＋** で速度を変えます。今の文、再開後、再起動後、トップ画面で照合します。速度は0.65〜1.65倍で自動保存します。トップ画面の **設定を保存** は音声の選択と辞書IDに使います。
+5. トップ画面で速度と高さを変更し、速度を変更して再開後、再起動後、トップ画面で照合します。速度は0.65〜1.65倍で自動保存します。トップ画面の **設定を保存** は音声の選択と辞書IDに使います。
+
+6. 通知欄・クイック設定を開いたままページ送りが発生しないこと、閉じた後に操作が再開することを確認します。タイルと通知から開始・一時停止・再開・終了をそれぞれ試します。
+7. 読み上げ中と一時停止中に手動でページを変え、画面署名の不一致が検出された後に停止し、未確認位置に復元しないことを確認します。即時検知は保証しません。
+8. 画面ロック、別アプリへの移動、通知を閉じず別アプリへ移動する場合を試し、位置が不確定なら停止することを確認します。通知欄の表示状態を判別できない場合も安全側に停止します。
 
 ## 3. 診断ログ
 
