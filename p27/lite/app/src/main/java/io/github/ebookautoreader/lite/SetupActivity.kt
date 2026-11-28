@@ -38,7 +38,7 @@ class SetupActivity : Activity() {
         button("通知を許可") { if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS),1) }
         val enabled=check("TalkBackと自動連動",p.enabled)
         val gap=number("読了判定 ms (500–4000)",p.gap)
-        val wait=number("新ページの無発話待機 ms (1000–8000)",p.noSpeech)
+        val wait=number("起動・送り後の無発話待機 ms (1000–8000)",p.noSpeech)
         val left=check("右向きスワイプ（左→右）で次ページへ。逆ならOFF",p.left)
         label("ページ送り：2本指スワイプ固定（タップは不発のため廃止）")
         val awake=check("読書中の画面点灯維持",p.awake)
@@ -51,7 +51,7 @@ class SetupActivity : Activity() {
             Toast.makeText(this,"保存済み。次回TalkBack ONから適用",Toast.LENGTH_SHORT).show()
         }
         button("緊急停止（TalkBack OFFまで再開しない）") { TurnService.instance?.emergencyStop() }
-        label("近接センサーを覆って読み上げを停止する設定はTalkBack側でOFF。画面を非表示にする機能はページ確認と競合する可能性があるので、当面OFF。")
+        label("近接センサーを覆って読み上げを停止する設定はTalkBack側でOFF。画面非表示機能との併用は実機未確認です。")
         setContentView(ScrollView(this).apply { addView(box) })
     }
 }
