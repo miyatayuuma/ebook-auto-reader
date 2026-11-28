@@ -75,6 +75,7 @@ class ReaderAccessibility : AccessibilityService() {
     private var targetMissing = false
     private val pageNumberOcr = mutableMapOf<PageNumberModel, PageNumberOcr>()
     private val pageNumberAttempts = mutableMapOf<PageNumberModel, Int>()
+    private val digitTemplates = TemplatePageNumberOcr()
 
     private val speechPreferenceChanged = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "rate") {
@@ -432,9 +433,28 @@ class ReaderAccessibility : AccessibilityService() {
                         val ocrStart = SystemClock.elapsedRealtime()
                         var result = "error"
                         var number: Int? = null
+                        var details = ""
                         try {
-                            val engine = pageNumberOcr.getOrPut(model) { PageNumberOcr(model) }
-                            number = engine.read(it.bitmap, target.bounds, screen)
+                            if (model == PageNumberModel.TEMPLATE) {
+                                val analyzed = digitTemplates.analyze(it.bitmap, target.bounds, screen)
+                                val match = analyzed.second
+                                number = match.number
+                                val method: String
+                                if (number == null) {
+                                    method = "mlkit"
+                                    val engine = pageNumberOcr.getOrPut(PageNumberModel.JAPANESE) {
+                                        PageNumberOcr(PageNumberModel.JAPANESE)
+                                    }
+                                    number = engine.read(it.bitmap, target.bounds, screen)
+                                    digitTemplates.learn(analyzed.first, number)
+                                } else method = "template"
+                                details = " method=$method learned=${digitTemplates.learned}" +
+                                    " error=${match.error ?: "none"} gap=${match.gap ?: "none"}" +
+                                    " fallback=${match.reason ?: "none"}"
+                            } else {
+                                val engine = pageNumberOcr.getOrPut(model) { PageNumberOcr(model) }
+                                number = engine.read(it.bitmap, target.bounds, screen)
+                            }
                             result = if (number == null) "unrecognized" else "ok"
                             if (number != null) successful = true
                         } catch (error: CancellationException) {
@@ -445,7 +465,7 @@ class ReaderAccessibility : AccessibilityService() {
                         } finally {
                             ReaderDiagnostics.event("page_number result=$result model=${model.argument}" +
                                 " phase=${if (attempt == 1) "first" else "subsequent"} attempt=$attempt" +
-                                " number=${number ?: "unknown"} captureMs=$captureMs" +
+                                " number=${number ?: "unknown"}$details captureMs=$captureMs" +
                                 " ocrMs=${SystemClock.elapsedRealtime() - ocrStart}" +
                                 " totalMs=${SystemClock.elapsedRealtime() - started}")
                         }
