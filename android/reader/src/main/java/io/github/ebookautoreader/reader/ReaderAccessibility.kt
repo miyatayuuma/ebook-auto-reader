@@ -13,6 +13,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.view.Display
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -39,6 +40,7 @@ class ReaderAccessibility : AccessibilityService() {
     private val lifetime = SupervisorJob()
     private val scope = CoroutineScope(lifetime + Dispatchers.Main.immediate)
     private val handler = Handler(Looper.getMainLooper())
+    private val manager by lazy { getSystemService(WindowManager::class.java) }
     private val power by lazy { getSystemService(PowerManager::class.java) }
     private val lockScreen by lazy { getSystemService(KeyguardManager::class.java) }
     private val preferences by lazy { ReaderPreferences(this) }
@@ -272,10 +274,9 @@ class ReaderAccessibility : AccessibilityService() {
         change(Mode.IDLE, userMessage(error), expand = true)
     }
 
-    private fun pagePort(
+    private fun windowPages(
         target: ReaderWindow, engine: OnDeviceOcr? = null, settings: TurnSettings = preferences.turn(),
-    ): ReaderPages {
-        val pages = WindowPages(
+    ): WindowPages = WindowPages(
             this, { currentWindow()?.takeIf { it == target } }, ::awaitReaderWindow,
             { _, send -> awaitReaderWindow(target); send() },
             { hasReaderMenu(target) }, ::awaitScreenshotSlot, settings,
@@ -285,6 +286,10 @@ class ReaderAccessibility : AccessibilityService() {
                 updateReadingStatus()
             }
         }
+    private fun pagePort(
+        target: ReaderWindow, engine: OnDeviceOcr? = null, settings: TurnSettings = preferences.turn(),
+    ): ReaderPages {
+        val pages = windowPages(target, engine, settings)
         return object : ReaderPages {
             override suspend fun capture(): PageFrame { awaitReaderWindow(target); return pages.capture() }
             override suspend fun prepareTurn(forward: Boolean, previous: PageSignature): suspend () -> PageFrame {
@@ -368,7 +373,7 @@ class ReaderAccessibility : AccessibilityService() {
             var successful = false
             try {
                 val captureStart = SystemClock.elapsedRealtime()
-                val frame = try { pagePort(target).captureForPageNumber() } finally {
+                val frame = try { awaitReaderWindow(target); windowPages(target).captureForPageNumber() } finally {
                     captureMs = SystemClock.elapsedRealtime() - captureStart
                 }
                 frame.use {
