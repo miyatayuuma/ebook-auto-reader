@@ -23,6 +23,7 @@ class DigitTemplatesTest {
         for (n in 0..9) repeat(2) { t.observe(listOf(glyph(n)), "$n") }
         assertEquals("low_confidence", t.match(listOf(FloatArray(560) { 0.5f })).reason)
         assertEquals("segmentation", t.match(emptyList()).reason)
+        assertEquals("segmentation", t.match(listOf(FloatArray(1))).reason)
         assertEquals("leading_zero", t.match(listOf(glyph(0), glyph(1))).reason)
         t.observe(listOf(glyph(5)), "1")
         assertEquals(0, t.learned)
