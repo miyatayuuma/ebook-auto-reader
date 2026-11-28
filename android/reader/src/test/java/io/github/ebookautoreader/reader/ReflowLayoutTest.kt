@@ -67,4 +67,35 @@ class ReflowLayoutTest {
         val heading = Region(Box(280, 80, 320, 280), 16, .85f, "第二章")
         assertEquals(PageKind.HEADING, ReflowLayout.read(listOf(heading), 500, 700, false).kind)
     }
+    @Test
+    fun illustrationClassificationRequiresPositiveEvidenceAndPreservesText() {
+        val image = Region(Box(30, 60, 470, 610), 6, .94f)
+        val nestedStructure = Region(Box(80, 100, 300, 400), 0, .8f)
+        val header = Region(Box(10, 10, 180, 30), 8, .9f)
+        val headerText = Region(Box(10, 10, 180, 30), 2, .9f, "書名")
+        val folio = Region(Box(220, 665, 250, 680), 1, .9f, "42")
+        val illustration = listOf(image, nestedStructure, header, headerText, folio)
+        val events = mutableListOf<String>()
+        val figure = ReflowLayout.read(illustration, 500, 700, false, reportClassification = events::add)
+        assertEquals(PageKind.FIGURE, figure.kind)
+        assertTrue(figure.lines.isEmpty())
+        assertTrue(events.single().contains("kind=FIGURE"))
+        val caption = Region(Box(80, 620, 300, 650), 2, .9f, "図の説明。")
+        assertEquals(listOf("図の説明。"), ReflowLayout.read(illustration + caption, 500, 700, false).lines.map { it.original })
+        val body = Region(Box(390, 80, 420, 350), 1, .9f, "本文です。")
+        assertEquals(PageKind.BODY, ReflowLayout.read(illustration + body, 500, 700, false).kind)
+        val failed = body.copy(text = "", complete = false)
+        assertEquals("ocr_incomplete_body", assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(illustration + failed, 500, 700, false)
+        }.reason)
+        assertThrows(ReaderFailure::class.java) {
+            ReflowLayout.read(illustration + caption.copy(text = "", complete = false), 500, 700, false)
+        }
+        val outside = Region(Box(5, 5, 490, 690), 3, .9f)
+        assertThrows(ReaderFailure::class.java) { ReflowLayout.read(illustration + outside, 500, 700, false) }
+        assertEquals(PageKind.BLANK, ReflowLayout.read(emptyList(), 500, 700, true).kind)
+        assertEquals(PageKind.BODY, ReflowLayout.read(listOf(body), 500, 700, false).kind)
+        assertThrows(ReaderFailure::class.java) { ReflowLayout.read(emptyList(), 500, 700, false) }
+    }
+
 }
