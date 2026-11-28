@@ -57,6 +57,9 @@ internal class ReaderSession(
 ) {
     private companion object {
         const val AHEAD_PAGES = 4
+        // One image undergoing OCR plus two queued images. Navigation's
+        // temporary verification screenshots are separate and promptly closed.
+        const val MAX_RETAINED_FRAMES = 3
         const val BUFFER_TARGET_MS = 20_000
         const val MAX_CLIPS = 8
     }
@@ -79,6 +82,8 @@ internal class ReaderSession(
     private val pending = ArrayDeque<Pending>()
     private val frames = ArrayDeque<CapturedPage>()
     private var readingFrame = false
+
+    private fun retainedFrames() = frames.size + if (readingFrame) 1 else 0
     private var captured = -1
     private var captureFinished = false
     private val changes = MutableStateFlow(0L)
@@ -208,7 +213,7 @@ internal class ReaderSession(
                         move(forward = true, target = visible + 1).close()
                         lastCheck = clock()
                     }
-                    captured < limit && frames.size + (if (readingFrame) 1 else 0) < 2 -> {
+                    captured < limit && retainedFrames() < MAX_RETAINED_FRAMES -> {
                         captureNext()
                         lastCheck = clock()
                     }
@@ -326,6 +331,7 @@ internal class ReaderSession(
         }
         frames.addLast(CapturedPage(target, frame))
         captured = target
+        log("image buffer captured page=$target retained=${retainedFrames()} capacity=$MAX_RETAINED_FRAMES")
         update(state)
     }
 

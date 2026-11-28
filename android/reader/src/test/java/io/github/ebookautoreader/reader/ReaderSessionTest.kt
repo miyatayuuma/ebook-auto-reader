@@ -251,9 +251,16 @@ class ReaderSessionTest {
         val session = ReaderSession(pages, FakeAudio(), Pronunciations(), {})
         val work = async { session.run() }
         advanceTimeBy(500)
-        assertTrue(pages.display >= 1)
+        // The first OCR is still running, but two more pages are captured.
+        assertEquals(2, pages.display)
         assertTrue(pages.decoded.isEmpty())
-        assertTrue(pages.frames - pages.closedFrames <= 2)
+        assertEquals(3, pages.frames - pages.closedFrames)
+        assertEquals(listOf(true, true), pages.turns)
+        // Once OCR frees a slot the producer can advance again.
+        advanceTimeBy(650)
+        assertEquals(listOf(0), pages.decoded)
+        assertEquals(3, pages.display)
+        assertEquals(3, pages.frames - pages.closedFrames)
         work.cancelAndJoin()
         assertEquals(pages.frames, pages.closedFrames)
         assertTrue(session.restore())
