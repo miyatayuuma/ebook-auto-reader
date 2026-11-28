@@ -54,6 +54,8 @@ internal class ReaderSession(
     private val report: (ReaderState) -> Unit,
     private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
     private val log: (String) -> Unit = {},
+    // A session keeps its selected policy across pause/resume.
+    internal val readingMode: ReadingMode = ReadingMode.DEFAULT,
 ) {
     private companion object {
         const val AHEAD_PAGES = 4
@@ -119,6 +121,7 @@ internal class ReaderSession(
     suspend fun run(startedAt: Long = clock()) {
         runStarted = startedAt
         milestones.clear()
+        log("reading mode=${readingMode.key}")
         try {
             coroutineScope {
                 verifyOrStart()

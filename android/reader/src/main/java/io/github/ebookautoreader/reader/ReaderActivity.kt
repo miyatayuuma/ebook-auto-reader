@@ -15,6 +15,8 @@ import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Spinner
@@ -41,6 +43,9 @@ class ReaderActivity : Activity() {
     private lateinit var rate: SeekBar
     private lateinit var pitch: SeekBar
     private lateinit var bookId: EditText
+    private lateinit var readingModes: RadioGroup
+    private val modeIds = mutableMapOf<ReadingMode, Int>()
+    private lateinit var modeDescription: TextView
     private var names = emptyList<String>()
     private var voiceLoaded = false
     private var task: Job? = null
@@ -70,6 +75,26 @@ class ReaderActivity : Activity() {
         button(content, "アクセシビリティ設定") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         button(content, "DMMブックスを開く") { openDmm() }
         content.addView(text("クイック設定を開き、編集からEbook Auto Readerを追加してください。通知を許可すると通知欄からも操作できます。", 15))
+        content.addView(text("読書モード", 21))
+        readingModes = RadioGroup(this).apply {
+            orientation = RadioGroup.VERTICAL
+            ReadingMode.entries.forEach { mode ->
+                addView(RadioButton(this@ReaderActivity).apply {
+                    id = View.generateViewId()
+                    modeIds[mode] = id
+                    text = mode.label
+                    minHeight = dp(48)
+                })
+            }
+        }.also(content::addView)
+        modeDescription = text("", 14).also(content::addView)
+        showReadingMode(preferences.readingMode())
+        readingModes.setOnCheckedChangeListener { _, id ->
+            val mode = modeIds.entries.firstOrNull { it.value == id }?.key
+                ?: return@setOnCheckedChangeListener
+            if (mode != preferences.readingMode()) preferences.saveReadingMode(mode)
+            modeDescription.text = readingModeDescription(mode)
+        }
         content.addView(text("音声設定", 21))
         voices = Spinner(this).also(content::addView)
         voiceInfo = text("日本語オフライン音声を確認中…", 14).also(content::addView)
@@ -109,6 +134,7 @@ class ReaderActivity : Activity() {
     override fun onResume() {
         super.onResume()
         refreshCache()
+        showReadingMode(preferences.readingMode())
         val saved = preferences.speech()
         rate.progress = SpeechRate.progress(saved.rate)
         pitch.progress = (saved.pitch * 100).roundToInt() - 75
@@ -120,6 +146,16 @@ class ReaderActivity : Activity() {
         } else {
             "アクセシビリティ設定でEbook Auto Readerを有効にしてください。"
         }
+    }
+
+    private fun readingModeDescription(mode: ReadingMode): String =
+        "${mode.description}\n次回の読書開始時に適用します（開発中：表示制御は次工程で有効化）。"
+
+    private fun showReadingMode(mode: ReadingMode) {
+        modeIds[mode]?.let { id ->
+            if (readingModes.checkedRadioButtonId != id) readingModes.check(id)
+        }
+        modeDescription.text = readingModeDescription(mode)
     }
 
     private fun pageCache() = RecognizedPageCache(noBackupFilesDir.resolve(RecognizedPageCache.DIRECTORY_NAME))

@@ -559,7 +559,8 @@ class ReaderAccessibility : AccessibilityService() {
         }
         this.audio = audio
         return ReaderSession(pagePort(target, createdOcr, settings), audio, pronunciations, ::onState,
-            clock = SystemClock::elapsedRealtime, log = ReaderDiagnostics::event)
+            clock = SystemClock::elapsedRealtime, log = ReaderDiagnostics::event,
+            readingMode = preferences.readingMode())
     }
 
     private fun onState(state: ReaderState) {

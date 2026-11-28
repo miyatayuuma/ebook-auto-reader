@@ -54,6 +54,9 @@ internal class ReaderPreferences(context: Context) {
     fun turn() = TurnSettings(TurnMethod.TAP, store.getBoolean("rightward", true), false)
     fun saveDirection(rightward: Boolean) { store.edit().putBoolean("rightward", rightward).apply() }
 
+    fun readingMode(): ReadingMode = ReadingMode.fromKey(store.getString("reading_mode", null))
+    fun saveReadingMode(mode: ReadingMode) { store.edit().putString("reading_mode", mode.key).apply() }
+
     fun bookId() = store.getString("book", "").orEmpty()
     fun saveBookId(id: String) {
         store.edit().putString("book", id).apply()
