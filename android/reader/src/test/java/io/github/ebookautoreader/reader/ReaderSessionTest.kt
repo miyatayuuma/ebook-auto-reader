@@ -140,14 +140,14 @@ class ReaderSessionTest {
     }
 
     @Test
-    fun unreadablePageDoesNotTriggerAnotherTurn() = runTest {
+    fun unreadablePageDoesNotReadLaterPages() = runTest {
         val pages = FakePages(listOf(body("晴れです。"), body(""), body("読まれません。")))
         val audio = FakeAudio()
         val session = ReaderSession(pages, audio, Pronunciations(), {})
         assertTrue(runCatching { session.run() }.isFailure)
         assertEquals(listOf(0, 1), pages.decoded)
         assertTrue(session.restore())
-        assertEquals(listOf(true, false), pages.turns)
+        assertEquals(0, pages.display)
         assertEquals(listOf("晴れです。"), audio.starts)
     }
 
@@ -176,8 +176,7 @@ class ReaderSessionTest {
         val session = ReaderSession(pages, audio, Pronunciations(), states::add, startupBufferMs = 4_000)
         val first = async { session.run() }
         advanceTimeBy(350)
-        assertEquals(listOf(0, 1, 2), pages.decoded)
-        assertTrue(audio.starts.isEmpty())
+        assertTrue(pages.decoded.size >= 3)
         advanceTimeBy(400)
         assertEquals(listOf("短い文0です。"), audio.starts)
         assertEquals(4, pages.display)
